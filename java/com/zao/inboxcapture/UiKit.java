@@ -50,6 +50,7 @@ public final class UiKit {
     public static final int DOT_XHS        = 0xFFF03E58;
     public static final int DOT_DY         = 0xFF23252A;
     public static final int DOT_WX         = 0xFF1AAD68;
+    public static final int DOT_BILI       = 0xFFFB7299;
 
     private UiKit() {}
 

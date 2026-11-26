@@ -2,6 +2,7 @@ package com.zao.inboxcapture;
 
 import android.accessibilityservice.AccessibilityServiceInfo;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.ActivityNotFoundException;
 import android.content.ComponentName;
 import android.content.Context;
@@ -12,11 +13,13 @@ import android.graphics.Typeface;
 import android.net.Uri;
 import android.os.Bundle;
 import android.provider.Settings;
+import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.accessibility.AccessibilityManager;
 import android.widget.FrameLayout;
+import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -68,6 +71,20 @@ public class MainActivity extends Activity implements InboxView.Host {
         topBar.addView(title, new LinearLayout.LayoutParams(
                 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
+        TextView addButton = new TextView(this);
+        addButton.setText("添加");
+        addButton.setTextSize(15);
+        addButton.setTypeface(Typeface.DEFAULT_BOLD);
+        addButton.setTextColor(UiKit.CORAL_ACCENT);
+        addButton.setGravity(Gravity.CENTER);
+        addButton.setMinHeight(UiKit.dp(this, 48));
+        addButton.setPadding(UiKit.dp(this, 12), 0, UiKit.dp(this, 12), 0);
+        addButton.setOnClickListener(v -> {
+            UiKit.hapticTick(v);
+            showAddLinkDialog();
+        });
+        topBar.addView(addButton);
+
         FrameLayout settingsButton = new FrameLayout(this);
         settingsButton.setPadding(UiKit.dp(this, 8), UiKit.dp(this, 6),
                 UiKit.dp(this, 2), UiKit.dp(this, 6));
@@ -87,6 +104,78 @@ public class MainActivity extends Activity implements InboxView.Host {
         root.addView(inboxView, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
         return root;
+    }
+
+    private void showAddLinkDialog() {
+        EditText input = new EditText(this);
+        input.setHint("粘贴链接");
+        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI
+                | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
+        input.setMinLines(2);
+        input.setGravity(Gravity.TOP | Gravity.START);
+        FrameLayout container = new FrameLayout(this);
+        int inset = UiKit.dp(this, 24);
+        container.setPadding(inset, UiKit.dp(this, 12), inset, 0);
+        container.addView(input, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("添加链接")
+                .setView(container)
+                .setNegativeButton("取消", null)
+                .setPositiveButton("确定", null)
+                .create();
+        dialog.setOnShowListener(ignored ->
+                dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+                        .setOnClickListener(v -> saveAddedLink(dialog, input)));
+        dialog.show();
+    }
+
+    private void saveAddedLink(AlertDialog dialog, EditText input) {
+        String text = input.getText().toString().trim();
+        if (NoteWriter.findSupportedUrl(text) == null) {
+            input.setError("请粘贴 B 站、抖音、小红书或公众号链接");
+            return;
+        }
+        input.setError(null);
+        View confirm = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
+        View cancel = dialog.getButton(AlertDialog.BUTTON_NEGATIVE);
+        confirm.setEnabled(false);
+        cancel.setEnabled(false);
+        input.setEnabled(false);
+        dialog.setCancelable(false);
+        Context app = getApplicationContext();
+        new Thread(() -> {
+            Exception error = null;
+            try {
+                NoteWriter.save(app, text);
+            } catch (Exception exc) {
+                error = exc;
+            }
+            Exception result = error;
+            runOnUiThread(() -> {
+                if (isFinishing() || isDestroyed() || !dialog.isShowing()) return;
+                if (result == null) {
+                    inboxView.refresh();
+                    dialog.dismiss();
+                    Toast.makeText(this, "已收纳链接", Toast.LENGTH_SHORT).show();
+                    return;
+                }
+                confirm.setEnabled(true);
+                cancel.setEnabled(true);
+                input.setEnabled(true);
+                dialog.setCancelable(true);
+                if (result instanceof NoteWriter.NotConfiguredException
+                        || result instanceof SecurityException) {
+                    input.setError("选择收纳目录后，再点「确定」");
+                    pickFolder();
+                } else {
+                    String message = result.getMessage();
+                    input.setError(message == null || message.isEmpty()
+                            ? "保存失败，请检查收纳目录后重试" : "保存失败：" + message);
+                }
+            });
+        }, "inbox-manual-save").start();
     }
 
     @Override

@@ -465,7 +465,7 @@ public final class PopupController {
         String url = NoteWriter.findSupportedUrl(text);
         if (url == null) {
             platDot.setBackground(UiKit.roundRect(app, UiKit.PAPER_MUTED, 999));
-            tagTxt.setText("非抖音 / 小红书 / 公众号链接");
+            tagTxt.setText("未识别到 B 站、抖音、小红书或公众号链接");
             preview.setText(compact(text, 120));
             save.setEnabled(false);
             save.setVisibility(View.GONE);

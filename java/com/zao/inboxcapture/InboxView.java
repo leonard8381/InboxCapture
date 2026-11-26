@@ -176,7 +176,7 @@ public final class InboxView extends FrameLayout {
                     UiKit.dp(ctx, 24), UiKit.dp(ctx, 32));
 
             TextView eh = new TextView(ctx);
-            eh.setText("在小红书、抖音或公众号\n点「复制链接」就会静静收进这里。");
+            eh.setText("在 B 站、抖音、小红书或公众号\n复制链接，或点右上角「添加」。");
             eh.setTextSize(18);
             eh.setTypeface(Typeface.DEFAULT_BOLD);
             eh.setTextColor(UiKit.PAPER_INK);
@@ -186,8 +186,8 @@ public final class InboxView extends FrameLayout {
             String last = Prefs.lastSaved(ctx);
             TextView es = new TextView(ctx);
             es.setText(last.isEmpty()
-                    ? "会自动截取当前画面并生成 Markdown，同步到你的 Obsidian Inbox。"
-                    : "升级前的最近一次收纳：" + last + "\n之后新收纳的灵感会带截图封面展示在这里。");
+                    ? "收纳后生成 Markdown，复制链接时可自动附上截图。"
+                    : "最近一次收纳：" + last);
             es.setTextSize(13);
             es.setTextColor(UiKit.PAPER_MUTED);
             es.setLineSpacing(UiKit.dp(ctx, 5), 1f);
@@ -754,6 +754,7 @@ public final class InboxView extends FrameLayout {
         if ("xiaohongshu".equals(platform)) return "在小红书打开原文 ↗";
         if ("douyin".equals(platform)) return "在抖音打开原文 ↗";
         if ("wechat".equals(platform)) return "打开公众号原文 ↗";
+        if ("bilibili".equals(platform)) return "在 B 站打开原文 ↗";
         return "打开原文链接 ↗";
     }
 
@@ -764,6 +765,8 @@ public final class InboxView extends FrameLayout {
             preferredPkgs = new String[]{"com.xingin.xhs"};
         } else if ("douyin".equals(platform)) {
             preferredPkgs = new String[]{"com.ss.android.ugc.aweme", "com.ss.android.ugc.aweme.lite"};
+        } else if ("bilibili".equals(platform)) {
+            preferredPkgs = new String[]{"tv.danmaku.bili"};
         } else {
             preferredPkgs = new String[0];
         }
@@ -1322,6 +1325,7 @@ public final class InboxView extends FrameLayout {
         if ("xiaohongshu".equals(platform)) return UiKit.DOT_XHS;
         if ("douyin".equals(platform)) return UiKit.DOT_DY;
         if ("wechat".equals(platform)) return UiKit.DOT_WX;
+        if ("bilibili".equals(platform)) return UiKit.DOT_BILI;
         return UiKit.CORAL_END;
     }
 

@@ -20,6 +20,7 @@ public final class Prefs {
     private static final String KEY_PLAT_XHS = "plat_xhs";
     private static final String KEY_PLAT_DY = "plat_dy";
     private static final String KEY_PLAT_WX = "plat_wx";
+    private static final String KEY_PLAT_BILI = "plat_bili";
 
 
     public static final class CaptureRecord {
@@ -105,6 +106,8 @@ public final class Prefs {
             ed.putInt(KEY_PLAT_DY, p.getInt(KEY_PLAT_DY, 0) + 1);
         } else if ("wechat".equals(platform)) {
             ed.putInt(KEY_PLAT_WX, p.getInt(KEY_PLAT_WX, 0) + 1);
+        } else if ("bilibili".equals(platform)) {
+            ed.putInt(KEY_PLAT_BILI, p.getInt(KEY_PLAT_BILI, 0) + 1);
         }
         try {
             JSONArray old = new JSONArray(p.getString(KEY_CAPTURE_FEED, "[]"));
@@ -168,6 +171,8 @@ public final class Prefs {
                 ed.putInt(KEY_PLAT_DY, Math.max(0, p.getInt(KEY_PLAT_DY, 0) - 1));
             } else if ("wechat".equals(target.platform)) {
                 ed.putInt(KEY_PLAT_WX, Math.max(0, p.getInt(KEY_PLAT_WX, 0) - 1));
+            } else if ("bilibili".equals(target.platform)) {
+                ed.putInt(KEY_PLAT_BILI, Math.max(0, p.getInt(KEY_PLAT_BILI, 0) - 1));
             }
             if (target.fileName.equals(p.getString(KEY_LAST, ""))) {
                 ed.putString(KEY_LAST, newFirstFile);
@@ -182,6 +187,7 @@ public final class Prefs {
         if ("xiaohongshu".equals(platform)) return p.getInt(KEY_PLAT_XHS, 0);
         if ("douyin".equals(platform)) return p.getInt(KEY_PLAT_DY, 0);
         if ("wechat".equals(platform)) return p.getInt(KEY_PLAT_WX, 0);
+        if ("bilibili".equals(platform)) return p.getInt(KEY_PLAT_BILI, 0);
         return 0;
     }
 

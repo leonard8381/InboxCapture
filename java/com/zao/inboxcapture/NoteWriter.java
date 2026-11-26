@@ -28,6 +28,10 @@ public final class NoteWriter {
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final Pattern URL_PATTERN =
             Pattern.compile("https?://[^\\s<>\"'`）】\\]，。！？、；：]+", Pattern.CASE_INSENSITIVE);
+    private static final Pattern BILIBILI_VIDEO_PATH =
+            Pattern.compile("/(?:video/(?:BV[A-Z0-9]+|av[0-9]+)|bangumi/play/(?:ep|ss)[0-9]+)/?",
+                    Pattern.CASE_INSENSITIVE);
+    private static final Pattern BILIBILI_SHORT_PATH = Pattern.compile("/[A-Za-z0-9]+/?");
     private static final Pattern EMBED_SHOT_PATTERN =
             Pattern.compile("!\\[\\[([^\\]\\r\\n]+\\.(?:jpg|jpeg|png|webp))\\]\\]", Pattern.CASE_INSENSITIVE);
 
@@ -118,12 +122,13 @@ public final class NoteWriter {
         if (url == null) {
             return "";
         }
-        String host;
+        URI uri;
         try {
-            host = new URI(url).getHost();
+            uri = new URI(url);
         } catch (Exception ignored) {
             return "";
         }
+        String host = uri.getHost();
         if (host == null) {
             return "";
         }
@@ -139,6 +144,18 @@ public final class NoteWriter {
         if (host.equals("weixin.qq.com") || host.endsWith(".weixin.qq.com")) {
             return "wechat";
         }
+        String scheme = uri.getScheme();
+        if (("https".equalsIgnoreCase(scheme) || "http".equalsIgnoreCase(scheme))
+                && uri.getRawUserInfo() == null) {
+            String path = uri.getRawPath();
+            if (host.equals("b23.tv") && BILIBILI_SHORT_PATH.matcher(path).matches()) {
+                return "bilibili";
+            }
+            if ((host.equals("bilibili.com") || host.endsWith(".bilibili.com"))
+                    && BILIBILI_VIDEO_PATH.matcher(path).matches()) {
+                return "bilibili";
+            }
+        }
         return "";
     }
 
@@ -151,6 +168,9 @@ public final class NoteWriter {
         }
         if ("wechat".equals(platform)) {
             return "公众号";
+        }
+        if ("bilibili".equals(platform)) {
+            return "B 站";
         }
         return platform;
     }
@@ -186,8 +206,8 @@ public final class NoteWriter {
         return save(context, text, screenshotName, null);
     }
 
-    public static Saved save(Context context, String text, String screenshotName,
-                             String screenshotUri) throws Exception {
+    public static synchronized Saved save(Context context, String text, String screenshotName,
+                                          String screenshotUri) throws Exception {
         String rawTree = Prefs.treeUri(context);
         if (rawTree.isEmpty()) {
             throw new NotConfiguredException();
@@ -251,6 +271,9 @@ public final class NoteWriter {
             }
             out.write(content.getBytes(StandardCharsets.UTF_8));
             out.flush();
+        } catch (Exception exc) {
+            ShotStore.deleteUri(resolver, created);
+            throw exc;
         }
 
         Prefs.bumpSaved(context);
