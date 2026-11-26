@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">灵感</string>
-    <string name="accessibility_description">发现复制动作后，读取剪贴板里的抖音、小红书、公众号链接，并提示收纳到 Obsidian；也用于记录今日训练。</string>
+    <string name="accessibility_description">发现复制动作后，读取剪贴板里的抖音、小红书、公众号链接，并提示收纳到 Obsidian。</string>
 </resources>
