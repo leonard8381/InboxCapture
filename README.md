@@ -13,6 +13,8 @@
 
 可在电脑锁屏后从手机收纳一条链接，再确认电脑端收到文件。 [Syncthing 配对说明](https://docs.syncthing.net/intro/getting-started.html)
 
+电脑端如需定期整理收纳，可以在 Agent 中使用[定时任务模板](templates/agent-scheduled-task.md)。
+
 ## 构建说明
 
 详见 [README-BUILD.md](README-BUILD.md)。
