@@ -9,31 +9,34 @@ import android.provider.OpenableColumns;
 import android.util.Log;
 
 import java.io.ByteArrayOutputStream;
+import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
-import java.security.SecureRandom;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
+import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/** 把一条剪贴板文本写成 Obsidian Inbox 里的 Markdown。 */
+/** 将一条收纳保存为 Markdown 和可选的截图。 */
 public final class NoteWriter {
     private static final String TAG = "InboxCapture";
-    private static final SecureRandom RANDOM = new SecureRandom();
+    static final String FOLDER_NAME = "test";
     private static final Pattern URL_PATTERN =
             Pattern.compile("https?://[^\\s<>\"'`）】\\]，。！？、；：]+", Pattern.CASE_INSENSITIVE);
     private static final Pattern BILIBILI_VIDEO_PATH =
             Pattern.compile("/(?:video/(?:BV[A-Z0-9]+|av[0-9]+)|bangumi/play/(?:ep|ss)[0-9]+)/?",
                     Pattern.CASE_INSENSITIVE);
     private static final Pattern BILIBILI_SHORT_PATH = Pattern.compile("/[A-Za-z0-9]+/?");
-    private static final Pattern EMBED_SHOT_PATTERN =
-            Pattern.compile("!\\[\\[([^\\]\\r\\n]+\\.(?:jpg|jpeg|png|webp))\\]\\]", Pattern.CASE_INSENSITIVE);
+    private static final Pattern EMBED_SHOT_PATTERN = Pattern.compile(
+            "!\\[\\[([^\\]\\r\\n]+\\.(?:jpg|jpeg|png|webp))\\]\\]"
+                    + "|!\\[[^\\]\\r\\n]*\\]\\(([^)\\r\\n]+\\.(?:jpg|jpeg|png|webp))\\)",
+            Pattern.CASE_INSENSITIVE);
 
     public static final class CaptureDetail {
         public final String url;
@@ -77,7 +80,7 @@ public final class NoteWriter {
 
     public static final class NotConfiguredException extends Exception {
         NotConfiguredException() {
-            super("还没有选择 Obsidian Inbox 文件夹");
+            super("请先选择 test 文件夹");
         }
     }
 
@@ -85,37 +88,25 @@ public final class NoteWriter {
 
     public static String folderName(Context context) {
         String raw = Prefs.treeUri(context);
-        if (raw.isEmpty()) {
+        return raw.isEmpty() ? "" : folderName(context, Uri.parse(raw));
+    }
+
+    static String folderName(Context context, Uri tree) {
+        try {
+            String documentId = DocumentsContract.getTreeDocumentId(tree);
+            Uri document = DocumentsContract.buildDocumentUriUsingTree(tree, documentId);
+            String name = queryDisplayName(context.getContentResolver(), document);
+            return name == null ? "" : name;
+        } catch (IllegalArgumentException exc) {
             return "";
         }
+    }
+
+    static Uri captureTree(Context context) {
+        String raw = Prefs.treeUri(context);
+        if (raw.isEmpty()) return null;
         Uri tree = Uri.parse(raw);
-        try (Cursor cursor = context.getContentResolver().query(
-                tree, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
-            if (cursor != null && cursor.moveToFirst()) {
-                int index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
-                if (index >= 0) {
-                    String name = cursor.getString(index);
-                    if (name != null && !name.isEmpty()) {
-                        return name;
-                    }
-                }
-            }
-        } catch (Exception ignored) {
-            // 某些 provider 不支持查询，退回 URI 末段。
-        }
-        String last = tree.getLastPathSegment();
-        if (last == null) {
-            return "";
-        }
-        int colon = last.indexOf(':');
-        if (colon >= 0) {
-            last = last.substring(colon + 1);
-        }
-        int slash = last.lastIndexOf('/');
-        if (slash >= 0) {
-            last = last.substring(slash + 1);
-        }
-        return last;
+        return FOLDER_NAME.equals(folderName(context, tree)) ? tree : null;
     }
 
     public static String platformOf(String url) {
@@ -199,17 +190,12 @@ public final class NoteWriter {
     }
 
     public static Saved save(Context context, String text) throws Exception {
-        return save(context, text, null, null);
+        return save(context, text, null);
     }
 
-    public static Saved save(Context context, String text, String screenshotName) throws Exception {
-        return save(context, text, screenshotName, null);
-    }
-
-    public static synchronized Saved save(Context context, String text, String screenshotName,
-                                          String screenshotUri) throws Exception {
-        String rawTree = Prefs.treeUri(context);
-        if (rawTree.isEmpty()) {
+    public static synchronized Saved save(Context context, String text, CapturedShot shot) throws Exception {
+        Uri tree = captureTree(context);
+        if (tree == null) {
             throw new NotConfiguredException();
         }
         String url = findSupportedUrl(text);
@@ -217,72 +203,97 @@ public final class NoteWriter {
             throw new IOException("没有识别到支持的链接");
         }
         String platform = platformOf(url);
-
-        Uri tree = Uri.parse(rawTree);
         ContentResolver resolver = context.getContentResolver();
-        String treeDocumentId;
-        try {
-            treeDocumentId = DocumentsContract.getTreeDocumentId(tree);
-        } catch (Exception exc) {
-            throw new IOException("Inbox 文件夹授权已失效，请重新选择");
-        }
-        Uri parent = DocumentsContract.buildDocumentUriUsingTree(tree, treeDocumentId);
 
         Date now = new Date();
-        String id = new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(now)
-                + "-" + String.format(Locale.US, "%04x", RANDOM.nextInt(0x10000));
+        SimpleDateFormat dayFormat = new SimpleDateFormat("yyyy-MM-dd", Locale.US);
+        SimpleDateFormat timeFormat = new SimpleDateFormat("HHmmss", Locale.US);
+        timeFormat.setTimeZone(dayFormat.getTimeZone());
+        String day = dayFormat.format(now);
+        String id = day + "_" + timeFormat.format(now) + "_"
+                + UUID.randomUUID().toString().substring(0, 8);
         String displayName = id + ".md";
+        String relativeName = day + "/" + displayName;
 
-        Uri created = null;
-        Exception firstError = null;
+        String rootId = DocumentsContract.getTreeDocumentId(tree);
+        Uri parent = findDocument(resolver, tree, rootId, day, DocumentsContract.Document.MIME_TYPE_DIR);
+        if (parent == null) {
+            Uri root = DocumentsContract.buildDocumentUriUsingTree(tree, rootId);
+            parent = createNamedDocument(resolver, root, DocumentsContract.Document.MIME_TYPE_DIR, day);
+        }
+
+        Uri image = null;
+        Uri note = null;
+        String imageName = shot == null ? null : id + ".jpg";
         try {
-            created = DocumentsContract.createDocument(resolver, parent, "text/markdown", displayName);
-        } catch (Exception exc) {
-            firstError = exc;
-        }
-        if (created == null) {
-            try {
-                created = DocumentsContract.createDocument(resolver, parent, "text/plain", displayName);
-            } catch (Exception exc) {
-                firstError = exc;
-            }
-        }
-        if (created == null) {
-            throw new IOException("无法创建文件（文件夹可能只读）", firstError);
-        }
-
-        String actualName = queryDisplayName(resolver, created);
-        if (actualName != null && !actualName.toLowerCase(Locale.US).endsWith(".md")) {
-            try {
-                Uri renamed = DocumentsContract.renameDocument(resolver, created, displayName);
-                if (renamed != null) {
-                    created = renamed;
+            if (shot != null) {
+                image = createNamedDocument(resolver, parent, "image/jpeg", imageName);
+                try (InputStream input = new FileInputStream(shot.file);
+                     OutputStream output = openOutput(resolver, image)) {
+                    byte[] buffer = new byte[8192];
+                    int count;
+                    while ((count = input.read(buffer)) != -1) {
+                        output.write(buffer, 0, count);
+                    }
                 }
-            } catch (Exception exc) {
-                ShotStore.deleteUri(resolver, created);
-                throw new IOException("当前文件夹不支持 .md 文件", exc);
             }
-        }
-
-        String content = buildContent(text, url, platform, id, now, screenshotName);
-        try (OutputStream out = resolver.openOutputStream(created, "w")) {
-            if (out == null) {
-                throw new IOException("无法打开写入流");
+            try {
+                note = createNamedDocument(resolver, parent, "text/markdown", displayName);
+            } catch (IOException unsupportedMarkdown) {
+                note = createNamedDocument(resolver, parent, "text/plain", displayName);
             }
-            out.write(content.getBytes(StandardCharsets.UTF_8));
-            out.flush();
+            try (OutputStream output = openOutput(resolver, note)) {
+                String content = buildContent(text, url, platform, id, now, imageName);
+                output.write(content.getBytes(StandardCharsets.UTF_8));
+            }
         } catch (Exception exc) {
-            ShotStore.deleteUri(resolver, created);
+            if (note != null) ShotStore.deleteUri(resolver, note);
+            if (image != null) ShotStore.deleteUri(resolver, image);
             throw exc;
         }
 
         Prefs.bumpSaved(context);
-        Prefs.setLastSaved(context, displayName);
-        Prefs.recordCapture(context, platform, extractTitlePreview(text, url), displayName,
-                screenshotName != null && !screenshotName.isEmpty(), screenshotUri,
-                created.toString(), screenshotName, url);
-        Log.i(TAG, "saved " + displayName + " platform=" + platform);
-        return new Saved(displayName, platform);
+        Prefs.setLastSaved(context, relativeName);
+        Prefs.recordCapture(context, platform, extractTitlePreview(text, url), relativeName,
+                image != null, image == null ? null : image.toString(),
+                note.toString(), imageName, url);
+        Log.i(TAG, "saved " + relativeName + " platform=" + platform);
+        return new Saved(relativeName, platform);
+    }
+
+    private static OutputStream openOutput(ContentResolver resolver, Uri uri) throws IOException {
+        OutputStream output = resolver.openOutputStream(uri, "w");
+        if (output == null) {
+            throw new IOException("无法打开文件写入流");
+        }
+        return output;
+    }
+
+    private static Uri createNamedDocument(ContentResolver resolver, Uri parent, String mimeType,
+                                           String name) throws IOException {
+        Uri created = DocumentsContract.createDocument(resolver, parent, mimeType, name);
+        if (created == null) {
+            throw new IOException("无法创建 " + name);
+        }
+        String actualName = queryDisplayName(resolver, created);
+        if (actualName == null || name.equals(actualName)) {
+            return created;
+        }
+        Uri document = created;
+        try {
+            Uri renamed = DocumentsContract.renameDocument(resolver, created, name);
+            if (renamed != null) {
+                document = renamed;
+                if (name.equals(queryDisplayName(resolver, document))) {
+                    return document;
+                }
+            }
+        } catch (Exception exc) {
+            ShotStore.deleteUri(resolver, document);
+            throw new IOException("无法使用文件名 " + name, exc);
+        }
+        ShotStore.deleteUri(resolver, document);
+        throw new IOException("无法使用文件名 " + name);
     }
 
     /** 读取单条灵感在仓库中的完整详情（正文、原文链接、处理状态、截图 URI）。 */
@@ -291,7 +302,7 @@ public final class NoteWriter {
             return new CaptureDetail("", "", "", null, false);
         }
         String fallbackUrl = rec.url;
-        Uri fallbackShot = rec.shotUri.isEmpty() ? null : Uri.parse(rec.shotUri);
+        Uri fallbackShot = null;
 
         String rawTree = Prefs.treeUri(context);
         if (rawTree.isEmpty()) {
@@ -299,6 +310,12 @@ public final class NoteWriter {
         }
         ContentResolver resolver = context.getContentResolver();
         Uri tree = Uri.parse(rawTree);
+        if (!rec.docUri.isEmpty() && !inTree(Uri.parse(rec.docUri), tree)) {
+            return new CaptureDetail(fallbackUrl, "", rec.title, null, false);
+        }
+        if (!rec.shotUri.isEmpty() && inTree(Uri.parse(rec.shotUri), tree)) {
+            fallbackShot = Uri.parse(rec.shotUri);
+        }
         String treeDocId;
         try {
             treeDocId = DocumentsContract.getTreeDocumentId(tree);
@@ -315,7 +332,7 @@ public final class NoteWriter {
         }
         if (mdUri == null && !rec.fileName.isEmpty()) {
             try {
-                mdUri = findDocument(resolver, tree, treeDocId, rec.fileName);
+                mdUri = findRelativeDocument(resolver, tree, treeDocId, rec.fileName);
             } catch (Exception ignored) {
             }
         }
@@ -358,7 +375,7 @@ public final class NoteWriter {
             if (found != null) parsedUrl = found;
         }
 
-        // 解析截图 URI（若列表里的 shotUri 为空，按嵌入的 ![[xxx.jpg]] 找回）
+        // 解析截图 URI（列表 URI 缺失时，从笔记中的图片链接找回）
         Uri shotUri = fallbackShot;
         if (shotUri != null && !documentExists(resolver, shotUri)) {
             shotUri = null;
@@ -366,12 +383,11 @@ public final class NoteWriter {
         if (shotUri == null) {
             String shotName = rec.shotName;
             if (shotName.isEmpty()) {
-                Matcher m = EMBED_SHOT_PATTERN.matcher(bodyPart);
-                if (m.find()) shotName = m.group(1);
+                shotName = embeddedShotName(bodyPart);
             }
-            if (!shotName.isEmpty()) {
+            if (simpleName(shotName)) {
                 try {
-                    shotUri = findDocument(resolver, tree, treeDocId, shotName);
+                    shotUri = findRelativeDocument(resolver, tree, treeDocId, siblingPath(rec.fileName, shotName));
                 } catch (Exception ignored) {
                 }
             }
@@ -385,17 +401,16 @@ public final class NoteWriter {
         return new CaptureDetail(parsedUrl, status, cleanedBody, shotUri, true);
     }
 
-    private static String readText(ContentResolver resolver, Uri uri, int maxBytes) {
+    static String readText(ContentResolver resolver, Uri uri, int maxBytes) {
         try (InputStream in = resolver.openInputStream(uri)) {
             if (in == null) return null;
             ByteArrayOutputStream out = new ByteArrayOutputStream();
             byte[] buf = new byte[4096];
             int n;
             int total = 0;
-            while ((n = in.read(buf)) > 0 && total < maxBytes) {
-                int take = Math.min(n, maxBytes - total);
-                out.write(buf, 0, take);
-                total += take;
+            while (total < maxBytes && (n = in.read(buf, 0, Math.min(buf.length, maxBytes - total))) > 0) {
+                out.write(buf, 0, n);
+                total += n;
             }
             return new String(out.toByteArray(), StandardCharsets.UTF_8);
         } catch (Exception ignored) {
@@ -403,7 +418,7 @@ public final class NoteWriter {
         }
     }
 
-    private static String stripYamlQuotes(String s) {
+    static String stripYamlQuotes(String s) {
         if (s.length() >= 2 && ((s.startsWith("\"") && s.endsWith("\""))
                 || (s.startsWith("'") && s.endsWith("'")))) {
             return s.substring(1, s.length() - 1)
@@ -427,7 +442,7 @@ public final class NoteWriter {
         }
         String rawTree = Prefs.treeUri(context);
         if (rawTree.isEmpty()) {
-            return new DeleteResult(false, false, false, "还没有选择 Obsidian Inbox 目录");
+            return new DeleteResult(false, false, false, "请先选择 test 文件夹");
         }
         ContentResolver resolver = context.getContentResolver();
         Uri tree = Uri.parse(rawTree);
@@ -435,80 +450,52 @@ public final class NoteWriter {
         try {
             treeDocId = DocumentsContract.getTreeDocumentId(tree);
         } catch (Exception exc) {
-            return new DeleteResult(false, false, false, "Inbox 目录授权已失效，请在设置中重新选择");
+            return new DeleteResult(false, false, false, "收纳目录授权已失效，请在设置中重新选择");
         }
 
-        // 1. 定位 .md 文档 URI
-        Uri mdUri = null;
-        if (!rec.docUri.isEmpty()) {
-            Uri candidate = Uri.parse(rec.docUri);
-            if (documentExists(resolver, candidate)) {
-                mdUri = candidate;
-            }
+        if (!rec.docUri.isEmpty() && !inTree(Uri.parse(rec.docUri), tree)) {
+            return new DeleteResult(false, false, false, "收纳目录已更换，请刷新列表");
         }
-        if (mdUri == null && !rec.fileName.isEmpty()) {
-            try {
-                mdUri = findDocument(resolver, tree, treeDocId, rec.fileName);
-            } catch (Exception exc) {
-                return new DeleteResult(false, false, false, "读取 Inbox 目录失败：" + safeMsg(exc));
-            }
-        }
-
-        // 2. 删除前从 .md 内容中解析嵌入的截图文件名（兼容旧版本记录）
-        String shotName = rec.shotName;
-        if (mdUri != null && (shotName == null || shotName.isEmpty())) {
-            String embedded = extractEmbeddedShotName(resolver, mdUri);
-            if (embedded != null && !embedded.isEmpty()) {
-                shotName = embedded;
-            }
-        }
-
-        // 3. 删除 .md 文件
-        boolean mdDeleted = false;
-        boolean mdNotFound = (mdUri == null);
-        if (mdUri != null) {
-            try {
-                mdDeleted = DocumentsContract.deleteDocument(resolver, mdUri);
-                if (!mdDeleted) {
-                    if (!documentExists(resolver, mdUri)) {
-                        mdNotFound = true;
-                    } else {
-                        return new DeleteResult(false, false, false, "仓库文件删除失败（目录可能只读）");
+        try {
+            Uri mdUri = findRelativeDocument(resolver, tree, treeDocId, rec.fileName);
+            if (mdUri == null) return new DeleteResult(false, true, false, null);
+            CaptureHistory.Note note = CaptureHistory.parse(readText(resolver, mdUri, 96 * 1024));
+            String name = rec.fileName.substring(rec.fileName.lastIndexOf('/') + 1);
+            boolean sameNote = note != null && (rec.captureId.isEmpty()
+                    ? name.equals(note.id + ".md") : rec.captureId.equals(note.id));
+            if (!sameNote) return new DeleteResult(false, false, false, "笔记已更改，请刷新列表");
+            Uri photo = null;
+            if (CaptureHistory.ownedShot(note)) {
+                photo = findRelativeDocument(resolver, tree, treeDocId, siblingPath(rec.fileName, note.shot));
+                // Legacy screenshots have an independent ID. Keep any file also used by another capture.
+                if (photo != null && !note.shot.equals(note.id + ".jpg")) {
+                    for (Prefs.CaptureRecord other : CaptureHistory.load(context)) {
+                        if (!other.fileName.equals(rec.fileName) && (photo.toString().equals(other.shotUri)
+                                || siblingPath(rec.fileName, note.shot).equals(
+                                        siblingPath(other.fileName, other.captureId + ".jpg")))) {
+                            photo = null;
+                            break;
+                        }
                     }
                 }
-            } catch (FileNotFoundException notFound) {
-                mdNotFound = true;
-            } catch (Exception exc) {
-                if (!documentExists(resolver, mdUri)) {
-                    mdNotFound = true;
-                } else {
-                    return new DeleteResult(false, false, false, "删除仓库文件失败：" + safeMsg(exc));
+            }
+            if (!DocumentsContract.deleteDocument(resolver, mdUri)) {
+                return new DeleteResult(false, false, false, "笔记删除失败");
+            }
+            boolean shotDeleted = false;
+            if (photo != null) {
+                try {
+                    shotDeleted = DocumentsContract.deleteDocument(resolver, photo);
+                } catch (Exception exc) {
+                    Log.w(TAG, "无法删除配套截图", exc);
                 }
             }
+            return new DeleteResult(true, false, shotDeleted, null);
+        } catch (FileNotFoundException missing) {
+            return new DeleteResult(false, true, false, null);
+        } catch (Exception exc) {
+            return new DeleteResult(false, false, false, "删除仓库文件失败：" + safeMsg(exc));
         }
-
-        // 4. 同步删除对应的截图文件
-        boolean shotDeleted = false;
-        if (!rec.shotUri.isEmpty()) {
-            try {
-                shotDeleted = DocumentsContract.deleteDocument(resolver, Uri.parse(rec.shotUri));
-            } catch (Exception ignored) {
-            }
-        }
-        if (!shotDeleted && shotName != null && !shotName.isEmpty()) {
-            try {
-                Uri shotDoc = findDocument(resolver, tree, treeDocId, shotName);
-                if (shotDoc != null) {
-                    shotDeleted = DocumentsContract.deleteDocument(resolver, shotDoc);
-                }
-            } catch (Exception ignored) {
-            }
-        }
-
-        Log.i(TAG, "deleteCapture file=" + rec.fileName
-                + " mdDeleted=" + mdDeleted + " mdNotFound=" + mdNotFound
-                + " shotDeleted=" + shotDeleted);
-        return new DeleteResult(mdDeleted, mdNotFound, shotDeleted, null);
     }
 
     private static boolean documentExists(ContentResolver resolver, Uri uri) {
@@ -520,19 +507,54 @@ public final class NoteWriter {
         }
     }
 
-    private static Uri findDocument(ContentResolver resolver, Uri tree, String treeId, String name)
-            throws IOException {
+    private static String siblingPath(String relativeName, String name) {
+        int separator = relativeName.lastIndexOf('/');
+        return separator < 0 ? name : relativeName.substring(0, separator + 1) + name;
+    }
+
+    static boolean simpleName(String name) {
+        return name != null && !name.isEmpty() && !name.equals(".") && !name.equals("..")
+                && name.indexOf('/') < 0 && name.indexOf('\\') < 0;
+    }
+
+    private static boolean inTree(Uri document, Uri tree) {
+        return DocumentsContract.isTreeUri(document) && tree.getAuthority().equals(document.getAuthority())
+                && DocumentsContract.getTreeDocumentId(tree).equals(DocumentsContract.getTreeDocumentId(document));
+    }
+
+    private static Uri findRelativeDocument(ContentResolver resolver, Uri tree, String rootId,
+                                            String relativePath) throws IOException {
+        String[] parts = relativePath.split("/", -1);
+        String parentId = rootId;
+        for (int i = 0; i < parts.length; i++) {
+            if (!simpleName(parts[i])) return null;
+            boolean last = i == parts.length - 1;
+            Uri doc = findDocument(resolver, tree, parentId, parts[i],
+                    last ? null : DocumentsContract.Document.MIME_TYPE_DIR);
+            if (doc == null || last) return doc;
+            parentId = DocumentsContract.getDocumentId(doc);
+        }
+        return null;
+    }
+
+    private static Uri findDocument(ContentResolver resolver, Uri tree, String treeId, String name,
+                                    String mimeType) throws IOException {
         Uri children = DocumentsContract.buildChildDocumentsUriUsingTree(tree, treeId);
         String[] cols = new String[]{
                 DocumentsContract.Document.COLUMN_DOCUMENT_ID,
-                DocumentsContract.Document.COLUMN_DISPLAY_NAME
+                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                DocumentsContract.Document.COLUMN_MIME_TYPE
         };
         try (Cursor c = resolver.query(children, cols, null, null, null)) {
             if (c == null) {
                 throw new IOException("目录查询返回空");
             }
             while (c.moveToNext()) {
-                if (name.equals(c.getString(1))) {
+                String actualType = c.getString(2);
+                boolean matchesType = mimeType == null
+                        ? actualType != null && !DocumentsContract.Document.MIME_TYPE_DIR.equals(actualType)
+                        : mimeType.equals(actualType);
+                if (name.equals(c.getString(1)) && matchesType) {
                     return DocumentsContract.buildDocumentUriUsingTree(tree, c.getString(0));
                 }
             }
@@ -540,25 +562,10 @@ public final class NoteWriter {
         return null;
     }
 
-    private static String extractEmbeddedShotName(ContentResolver resolver, Uri mdUri) {
-        try (InputStream in = resolver.openInputStream(mdUri)) {
-            if (in == null) return null;
-            ByteArrayOutputStream out = new ByteArrayOutputStream();
-            byte[] buf = new byte[4096];
-            int n;
-            int total = 0;
-            while ((n = in.read(buf)) > 0 && total < 32768) {
-                out.write(buf, 0, n);
-                total += n;
-            }
-            String text = new String(out.toByteArray(), StandardCharsets.UTF_8);
-            Matcher m = EMBED_SHOT_PATTERN.matcher(text);
-            if (m.find()) {
-                return m.group(1);
-            }
-        } catch (Exception ignored) {
-        }
-        return null;
+    static String embeddedShotName(String text) {
+        Matcher match = EMBED_SHOT_PATTERN.matcher(text);
+        if (!match.find()) return "";
+        return match.group(1) != null ? match.group(1) : match.group(2);
     }
 
     private static String safeMsg(Exception exc) {
@@ -615,7 +622,7 @@ public final class NoteWriter {
                 + "## 补充截图 / 备注\n"
                 + (screenshotName == null || screenshotName.isEmpty()
                         ? ""
-                        : "\n![[" + screenshotName + "]]\n");
+                        : "\n![截图](" + screenshotName + ")\n");
     }
 
     private static String yaml(String value) {

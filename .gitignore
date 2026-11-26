@@ -6,3 +6,5 @@ keystore/
 *.zip
 .DS_Store
 *.swp
+/native/
+/assets/syncthing-peer.json

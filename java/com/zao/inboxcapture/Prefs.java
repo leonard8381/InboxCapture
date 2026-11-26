@@ -33,6 +33,7 @@ public final class Prefs {
         public final String docUri;
         public final String shotName;
         public final String url;
+        final String captureId;
 
         public CaptureRecord(String platform, String title, String fileName,
                              long timeMs, boolean hasShot, String shotUri) {
@@ -42,6 +43,13 @@ public final class Prefs {
         public CaptureRecord(String platform, String title, String fileName,
                              long timeMs, boolean hasShot, String shotUri,
                              String docUri, String shotName, String url) {
+            this(platform, title, fileName, timeMs, hasShot, shotUri, docUri, shotName, url, "");
+        }
+
+        CaptureRecord(String platform, String title, String fileName,
+                      long timeMs, boolean hasShot, String shotUri, String docUri,
+                      String shotName, String url, String captureId) {
+            this.captureId = captureId;
             this.platform = platform == null ? "" : platform;
             this.title = title == null ? "" : title;
             this.fileName = fileName == null ? "" : fileName;
@@ -95,7 +103,7 @@ public final class Prefs {
         recordCapture(context, platform, title, fileName, hasShot, shotUri, null, null, null);
     }
 
-    public static void recordCapture(Context context, String platform, String title,
+    public static synchronized void recordCapture(Context context, String platform, String title,
                                      String fileName, boolean hasShot, String shotUri,
                                      String docUri, String shotName, String url) {
         SharedPreferences p = prefs(context);
@@ -132,7 +140,7 @@ public final class Prefs {
         ed.apply();
     }
 
-    public static boolean removeCapture(Context context, CaptureRecord target) {
+    public static synchronized boolean removeCapture(Context context, CaptureRecord target) {
         if (target == null) return false;
         SharedPreferences p = prefs(context);
         SharedPreferences.Editor ed = p.edit();
@@ -143,9 +151,10 @@ public final class Prefs {
             JSONArray next = new JSONArray();
             for (int i = 0; i < old.length(); i++) {
                 JSONObject o = old.getJSONObject(i);
-                boolean match = !removed
-                        && target.fileName.equals(o.optString("f", ""))
-                        && (target.timeMs == 0L || target.timeMs == o.optLong("ms", 0L));
+                String storedDoc = o.optString("d", "");
+                boolean sameDocument = !storedDoc.isEmpty() && !target.docUri.isEmpty()
+                        ? storedDoc.equals(target.docUri) : target.fileName.equals(o.optString("f", ""));
+                boolean match = !removed && sameDocument;
                 if (match) {
                     removed = true;
                     continue;

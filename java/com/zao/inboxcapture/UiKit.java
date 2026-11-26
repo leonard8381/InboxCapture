@@ -28,10 +28,10 @@ import android.widget.TextView;
 /** 灵感收纳的界面组件。 */
 public final class UiKit {
     // ---- Editorial Day Palette ----
-    public static final int PAPER_BG       = 0xFFF6F4EF;
+    public static final int PAPER_BG       = 0xFFF8F7F3;
     public static final int PAPER_SHEET    = 0xFFFFFFFF;
     public static final int PAPER_MUTED_BG = 0xFFF2EFE8;
-    public static final int PAPER_DIVIDER  = 0xFFF2EFEA;
+    public static final int PAPER_DIVIDER  = 0xFFE5E1D9;
     public static final int PAPER_INK      = 0xFF151514;
     public static final int PAPER_SECOND   = 0xFF6E6B64;
     public static final int PAPER_MUTED    = 0xFF9C988F;
@@ -40,10 +40,10 @@ public final class UiKit {
     // ---- Warm Coral Accent ----
     public static final int CORAL_START    = 0xFFFF9442;
     public static final int CORAL_END      = 0xFFF05A39;
-    public static final int CORAL_ACCENT   = 0xFFEE5D36;
+    public static final int CORAL_ACCENT   = 0xFFB13F25;
 
     // ---- Semantic Dots ----
-    public static final int OK_GREEN       = 0xFF1FA971;
+    public static final int OK_GREEN       = 0xFF237050;
     public static final int WARN_AMBER     = 0xFFD97706;
     public static final int DANGER_RED     = 0xFFD94A3D;
 
@@ -204,21 +204,23 @@ public final class UiKit {
             } else if (glyph == GLYPH_GEAR) {
                 float cx = w * 0.5f;
                 float cy = h * 0.5f;
-                float rOuter = Math.min(w, h) * 0.34f;
-                float rInner = Math.min(w, h) * 0.14f;
+                float radius = Math.min(w, h) * 0.43f;
                 paint.setStyle(Paint.Style.STROKE);
-                paint.setStrokeWidth(dpf(getContext(), 1.7f));
-                paint.setStrokeCap(Paint.Cap.ROUND);
-                canvas.drawCircle(cx, cy, rInner, paint);
-                canvas.drawCircle(cx, cy, rOuter * 0.78f, paint);
-                for (int i = 0; i < 6; i++) {
-                    double rad = Math.toRadians(i * 60.0);
-                    float x1 = cx + (float) Math.cos(rad) * (rOuter * 0.76f);
-                    float y1 = cy + (float) Math.sin(rad) * (rOuter * 0.76f);
-                    float x2 = cx + (float) Math.cos(rad) * (rOuter * 1.05f);
-                    float y2 = cy + (float) Math.sin(rad) * (rOuter * 1.05f);
-                    canvas.drawLine(x1, y1, x2, y2, paint);
+                paint.setStrokeWidth(dpf(getContext(), 1.6f));
+                paint.setStrokeJoin(Paint.Join.ROUND);
+                for (int tooth = 0; tooth < 8; tooth++) {
+                    for (int vertex = 0; vertex < 4; vertex++) {
+                        double angle = Math.toRadians(45 * tooth + 11.25 * vertex);
+                        float r = vertex == 1 || vertex == 2 ? radius : radius * 0.8f;
+                        float x = cx + (float) Math.cos(angle) * r;
+                        float y = cy + (float) Math.sin(angle) * r;
+                        if (tooth == 0 && vertex == 0) path.moveTo(x, y);
+                        else path.lineTo(x, y);
+                    }
                 }
+                path.close();
+                canvas.drawPath(path, paint);
+                canvas.drawCircle(cx, cy, radius * 0.36f, paint);
             }
         }
     }

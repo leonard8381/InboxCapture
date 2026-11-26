@@ -1,0 +1,4 @@
+f87f00387b63a36ae1e4e10ba6c9135cc4f92e33d37948ae37048bda85fccee7  lib/arm64-v8a/libsyncthing.so
+34d9bd3154abd1d455047e3d486582ce299ea08603848a1a34250956dd60e13e  lib/armeabi-v7a/libsyncthing.so
+d597aa2782797d05534bf53e30fa7de161e99962ca6854c09e7ab79d6d771737  lib/x86/libsyncthing.so
+9fe63f898da4ee50d8aa8c98965bcb7bed8b371e68367e3ad28b50a0f21a0cca  lib/x86_64/libsyncthing.so

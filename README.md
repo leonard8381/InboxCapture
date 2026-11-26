@@ -1,25 +1,22 @@
 # 灵感（Lingan）Android App
 
-灵感是一款纯 Java（Android 10+）的本地收纳应用。复制 B 站、抖音、小红书或微信公众号链接后，可在悬浮窗确认保存，生成 Markdown 笔记和截图。收纳列表支持查看原文、截图和删除记录。
-
-也可以打开「灵感」，点右上角「添加」，粘贴支持的链接后点「确定」，直接保存 Markdown。手动添加可在悬浮窗和无障碍监听尚未启用时使用。
+灵感是一款 Android 10 及以上可用的本地收纳应用。在 B 站、抖音、小红书或微信公众号复制链接后，可在悬浮窗确认保存，也可以在首页点「手动添加」，粘贴链接后点「确定」。应用按日期保存 Markdown 笔记和配图，可以直接用 Obsidian 阅读。
 
 ## 手机和电脑文件夹同步
 
-「灵感」将 Markdown 和截图写入手机本地文件夹。用 Syncthing 可以让该文件夹和 Windows 上的指定目录自动同步。
+「收纳设置 → 连接电脑」内置 Syncthing。电脑运行 Syncthing，手机选择可读写的收纳目录，例如 `test`。[电脑端下载](https://syncthing.net/downloads/)
 
-1. 手机上安装 [Syncthing-Fork](https://f-droid.org/packages/com.github.catfriend1.syncthingfork/)，电脑上安装 [Syncthing](https://syncthing.net/downloads/)。首次配置时，两台设备连接同一个 Wi-Fi，互相添加设备 ID。
-2. 在「灵感 → 收纳设置」选择一个可写目录，例如手机的「文档/test」。在 Syncthing-Fork 里共享该目录，电脑接受共享后选择接收目录，例如桌面的「test1」。
-3. 只需手机上传时，手机文件夹设为「仅发送」，电脑设为「仅接收」。需要两边互改时，两端都选「发送与接收」。手机删除源文件也会同步到电脑。
-4. Windows 锁屏时保持联网、唤醒并让 Syncthing 运行。手机端在系统设置中允许 Syncthing-Fork 后台运行，应用的「运行条件」里允许用电池时通过 Wi-Fi 同步。
+1. 首次配对时，手机和电脑连接同一个局域网。通用构建需要先把电脑的配对信息放进手机所选目录的 `release/syncthing-peer.json`。格式见[构建说明](README-BUILD.md#首次配对资料)。
+2. 在手机粘贴电脑的完整设备 ID。在电脑接受新设备，并向它共享现有的收纳目录。手机确认接管。若此前用了独立版 Syncthing 同步这个手机目录，请在接管前暂停独立版的这项共享。
+3. 「同步方式」以手机为准。「只读」接收电脑的改动，「只写」向电脑发送改动，「读+写」互传。双向同步也会传递删除操作。
+4. 配对后可使用其他 WiFi 或移动数据同步。两端优先直连，必要时通过公共中继传输端到端加密的数据。电脑锁屏时保持唤醒、联网并运行 Syncthing。手机需要长期后台同步时，开启「后台同步」，并按页面提示调整系统电池设置。[Syncthing 中继说明](https://docs.syncthing.net/users/relaying.html)
 
-可在电脑锁屏后从手机收纳一条链接，再确认电脑端收到文件。 [Syncthing 配对说明](https://docs.syncthing.net/intro/getting-started.html)
+需要电脑定期整理收纳时，可在 Agent 中使用[定时任务模板](templates/agent-scheduled-task.md)。
 
-电脑端如需定期整理收纳，可以在 Agent 中使用[定时任务模板](templates/agent-scheduled-task.md)。
+## 从收纳文件夹更新
 
-## 构建说明
+将同一签名、版本号更高的 APK 放入共享目录的 `release/`。手机收到文件后，打开「收纳设置 → 检查更新」查看版本，点「确认更新」开始安装。首次安装可能需要按 Android 提示授权。
 
-详见 [README-BUILD.md](README-BUILD.md)。
+## 构建
 
-- 正式构建（需本地 `keystore/release.keystore`）：`./build.sh`
-- 本机无密钥编译验证（macOS / Linux）：`ALLOW_TEMP_DEBUG_KEY=1 ./build.sh`
+使用 `./build.sh` 构建。开发环境、签名、内置依赖校验及首次配对资料见[构建说明](README-BUILD.md)。

@@ -1,0 +1,24 @@
+灵感内置的 Syncthing 同步引擎
+
+Syncthing v2.1.7 版权所有 © The Syncthing Authors，采用 Mozilla Public License 2.0。
+本 APK 内包含该程序的四个 Android 原生版本。文件取自 Syncthing-Fork
+v2.1.7.1 的通用 Android 安装包，原文件名为 libsyncthingnative.so。
+在本 APK 中它们以 libsyncthing.so 分发。各版本的二进制内容均与对应的上游文件相同。
+
+对应版本的完整引擎源码（含 vendored 依赖）可免费从以下地址取得：
+https://github.com/syncthing/syncthing/releases/download/v2.1.7/syncthing-source-v2.1.7.tar.gz
+SHA-256: 5b84abd0e8b187f618fb2c38c37fa37ce0b377a275d3e0b981bad94176a24afa
+对应的引擎提交：
+https://github.com/syncthing/syncthing/tree/d6d0181f7d466381c4b39ec8fd944c364f939b32
+
+Android 构建项目、脚本及所用引擎子模块：
+https://github.com/researchxxl/syncthing-android/tree/71fca13c1cc255fc0999b87aabecbfb3d621aa64/syncthing
+原发行包：
+https://github.com/researchxxl/syncthing-android/releases/tag/v2.1.7.1
+通用 APK 的 SHA-256: 20fb0c3b81d0c583b97023289a104326504f969caab3ab4308cbe7590d052b3e
+
+MPL-2.0.txt contains the license for Syncthing. AUTHORS.txt lists its
+contributors. THIRD-PARTY-NOTICES.txt includes the license and notice files
+from the vendored dependencies and web interface in the source release.
+Go-LICENSE.txt contains the Go runtime license. SHA256SUMS.txt lists the
+hashes of the four executables distributed in this APK.

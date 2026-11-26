@@ -188,7 +188,7 @@ public class CaptureAccessibilityService extends AccessibilityService {
                     public void onCaptured(CapturedShot shot) {
                         capturing = false;
                         if (!PopupController.shouldShow(text)) {
-                            ShotStore.delete(service, shot);
+                            ShotStore.delete(shot);
                             return;
                         }
                         try {

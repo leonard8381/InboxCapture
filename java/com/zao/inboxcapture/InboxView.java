@@ -19,6 +19,7 @@ import android.os.Looper;
 import android.provider.Settings;
 import android.text.TextUtils;
 import android.util.DisplayMetrics;
+import android.util.LruCache;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.VelocityTracker;
@@ -29,6 +30,9 @@ import android.view.ViewOutlineProvider;
 import android.view.Window;
 import android.view.WindowManager;
 import android.view.animation.DecelerateInterpolator;
+import android.widget.AbsListView;
+import android.widget.BaseExpandableListAdapter;
+import android.widget.ExpandableListView;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -39,18 +43,21 @@ import android.widget.Toast;
 import java.io.InputStream;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
-import java.util.Calendar;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
-/**
- * 「灵感」页（无框杂志流）：
- * - 平时只呈现安静的状态行 + 按今天/本周分组的内容画廊流（无描边卡片框）
- * - 权限与 Obsidian 目录收进右上角 ⚙ 瓷白底部抽屉；未开启全权限时顶部出一条温和引导
- */
+/** 灵感收纳的分日列表、详情和设置。 */
 public final class InboxView extends FrameLayout {
     public interface Host {
         boolean isAccessibilityEnabled();
@@ -60,42 +67,108 @@ public final class InboxView extends FrameLayout {
         void onOpenBatterySettings();
         void onPickFolder();
         void onTestPopup();
+        void onCheckUpdate();
+        void onConnectComputer();
         void onCleanupOldVersion();
     }
 
     private static final ExecutorService THUMB_EXEC = Executors.newFixedThreadPool(2);
     private static final ExecutorService DELETE_EXEC = Executors.newSingleThreadExecutor();
+    private static final ExecutorService HISTORY_EXEC = Executors.newSingleThreadExecutor();
+    private static final DateTimeFormatter CLOCK = DateTimeFormatter.ofPattern("HH:mm", Locale.CHINA);
+    private static final DateTimeFormatter MONTH_DAY = DateTimeFormatter.ofPattern("M月d日", Locale.CHINA);
+    private static final DateTimeFormatter FULL_DATE = DateTimeFormatter.ofPattern("yyyy年M月d日", Locale.CHINA);
+
     private final Host host;
-    private final LinearLayout content;
     private final Handler main = new Handler(Looper.getMainLooper());
-    private int renderGeneration = 0;
+    private final ExpandableListView archive;
+    private final ArchiveAdapter adapter = new ArchiveAdapter();
+    private final Map<LocalDate, Boolean> chosenExpansion = new HashMap<>();
+    private final LruCache<String, Bitmap> thumbnails = new LruCache<String, Bitmap>(4 * 1024 * 1024) {
+        @Override protected int sizeOf(String key, Bitmap bitmap) {
+            return bitmap.getByteCount();
+        }
+    };
+    private final TextView statusLabel;
+    private final View statusDot;
+    private final TextView folderLabel;
+    private final TextView emptyLabel;
+    private final LinearLayout statusBar;
+    private LocalDate today = LocalDate.now();
+    private String currentTree;
+    private Future<?> historyJob;
+    private int generation;
     private SwipeDeleteRow openedRow;
 
     public InboxView(Context context, Host host) {
         super(context);
         this.host = host;
+        LinearLayout column = new LinearLayout(context);
+        column.setOrientation(LinearLayout.VERTICAL);
+        addView(column, new LayoutParams(-1, -1));
 
-        ScrollView scroll = new ScrollView(context);
-        scroll.setFillViewport(true);
-        scroll.setVerticalScrollBarEnabled(false);
-        scroll.setOnScrollChangeListener(new OnScrollChangeListener() {
-            @Override
-            public void onScrollChange(View v, int scrollX, int scrollY, int oldScrollX, int oldScrollY) {
-                if (Math.abs(scrollY - oldScrollY) > 4) {
-                    closeOpenedRow();
-                }
+        statusBar = new LinearLayout(context);
+        statusBar.setGravity(Gravity.CENTER_VERTICAL);
+        int inset = UiKit.dp(context, 20);
+        statusBar.setPadding(inset, 0, inset, 0);
+        statusBar.setMinimumHeight(UiKit.dp(context, 44));
+        statusDot = new View(context);
+        LinearLayout.LayoutParams dotParams = new LinearLayout.LayoutParams(
+                UiKit.dp(context, 7), UiKit.dp(context, 7));
+        dotParams.rightMargin = UiKit.dp(context, 8);
+        statusBar.addView(statusDot, dotParams);
+        statusLabel = listText(context, 14, UiKit.PAPER_INK);
+        statusLabel.setTypeface(Typeface.DEFAULT_BOLD);
+        statusBar.addView(statusLabel, new LinearLayout.LayoutParams(0, -2, 1f));
+        folderLabel = listText(context, 14, UiKit.PAPER_SECOND);
+        folderLabel.setCompoundDrawablesWithIntrinsicBounds(
+                new ArchiveFolderIcon(context), null, null, null);
+        folderLabel.setCompoundDrawablePadding(UiKit.dp(context, 6));
+        statusBar.addView(folderLabel);
+        column.addView(statusBar);
+        View rule = new View(context);
+        rule.setBackgroundColor(0xFFDAD7CF);
+        LinearLayout.LayoutParams ruleParams = new LinearLayout.LayoutParams(-1, 1);
+        ruleParams.setMargins(inset, 0, inset, UiKit.dp(context, 6));
+        column.addView(rule, ruleParams);
+
+        FrameLayout body = new FrameLayout(context);
+        column.addView(body, new LinearLayout.LayoutParams(-1, 0, 1f));
+        archive = new ExpandableListView(context);
+        archive.setGroupIndicator(null);
+        archive.setChildDivider(null);
+        archive.setDivider(null);
+        archive.setVerticalScrollBarEnabled(false);
+        archive.setCacheColorHint(Color.TRANSPARENT);
+        archive.setAdapter(adapter);
+        archive.setOnScrollListener(new AbsListView.OnScrollListener() {
+            @Override public void onScrollStateChanged(AbsListView view, int state) {
+                if (state != SCROLL_STATE_IDLE) closeOpenedRow();
+            }
+            @Override public void onScroll(AbsListView view, int first, int visible, int total) {}
+        });
+        archive.setOnGroupClickListener((list, row, index, id) -> {
+            closeOpenedRow();
+            boolean expand = !archive.isGroupExpanded(index);
+            chosenExpansion.put(adapter.getGroup(index).date, expand);
+            UiKit.hapticTick(row);
+            if (expand) archive.expandGroup(index);
+            else archive.collapseGroup(index);
+            return true;
+        });
+        archive.setRecyclerListener(view -> {
+            if (view instanceof SwipeDeleteRow) {
+                SwipeDeleteRow row = (SwipeDeleteRow) view;
+                row.close(false);
+                ((RecordLine) row.fgView).cancelThumbnail();
             }
         });
-
-        content = new LinearLayout(context);
-        content.setOrientation(LinearLayout.VERTICAL);
-        content.setPadding(0, UiKit.dp(context, 10), 0, UiKit.dp(context, 48));
-        scroll.addView(content, new ScrollView.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        addView(scroll, new LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-
-        refresh();
+        body.addView(archive, new LayoutParams(-1, -1));
+        emptyLabel = listText(context, 15, UiKit.PAPER_SECOND);
+        emptyLabel.setGravity(Gravity.CENTER);
+        emptyLabel.setPadding(inset, UiKit.dp(context, 54), inset, 0);
+        body.addView(emptyLabel, new LayoutParams(-1, -2));
+        archive.setEmptyView(emptyLabel);
     }
 
     public void closeOpenedSwipeRow() {
@@ -103,251 +176,276 @@ public final class InboxView extends FrameLayout {
     }
 
     private void closeOpenedRow() {
-        if (openedRow != null) {
-            SwipeDeleteRow target = openedRow;
-            openedRow = null;
-            target.close(true);
-        }
+        if (openedRow != null) openedRow.close(true);
     }
 
     public void refresh() {
-        final Context ctx = getContext();
-        renderGeneration++;
-        final int myGen = renderGeneration;
-        openedRow = null;
-        content.removeAllViews();
-
+        Context ctx = getContext();
+        Context app = ctx.getApplicationContext();
+        String tree = Prefs.treeUri(ctx);
+        boolean changed = !tree.equals(currentTree);
+        currentTree = tree;
+        if (changed) {
+            chosenExpansion.clear();
+            adapter.groups.clear();
+            adapter.notifyDataSetChanged();
+            thumbnails.evictAll();
+        }
+        int request = ++generation;
+        if (historyJob != null) historyJob.cancel(true);
         boolean overlay = Settings.canDrawOverlays(ctx);
-        boolean access = host.isAccessibilityEnabled();
-        String folder = NoteWriter.folderName(ctx);
-        boolean folderOk = !folder.isEmpty();
-        boolean allReady = overlay && access && folderOk;
-        int total = Prefs.savedCount(ctx);
-
-        // 1. Quiet Subbar (● 自动收纳已开启   |   Obsidian · 128 条)
-        LinearLayout subbar = new LinearLayout(ctx);
-        subbar.setOrientation(LinearLayout.HORIZONTAL);
-        subbar.setGravity(Gravity.CENTER_VERTICAL);
-        subbar.setPadding(UiKit.dp(ctx, 24), UiKit.dp(ctx, 2),
-                UiKit.dp(ctx, 24), UiKit.dp(ctx, 14));
-
-        View dot = new View(ctx);
-        dot.setBackground(UiKit.roundRect(ctx, allReady ? UiKit.OK_GREEN : UiKit.CORAL_END, 999));
-        LinearLayout.LayoutParams dLp = new LinearLayout.LayoutParams(
-                UiKit.dp(ctx, 6), UiKit.dp(ctx, 6));
-        dLp.rightMargin = UiKit.dp(ctx, 7);
-        subbar.addView(dot, dLp);
-
-        TextView statusTxt = new TextView(ctx);
-        if (allReady) {
-            statusTxt.setText("自动收纳已开启");
-            statusTxt.setTextColor(UiKit.PAPER_SECOND);
-        } else {
-            int missing = (overlay ? 0 : 1) + (access ? 0 : 1) + (folderOk ? 0 : 1);
-            statusTxt.setText("还有 " + missing + " 项权限待开启 · 去设置 ›");
-            statusTxt.setTextColor(UiKit.CORAL_ACCENT);
-            subbar.setOnClickListener(new OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    UiKit.hapticTick(v);
-                    openSettingsSheet();
-                }
-            });
-        }
-        statusTxt.setTextSize(12);
-        statusTxt.setTypeface(Typeface.DEFAULT_BOLD);
-        subbar.addView(statusTxt, new LinearLayout.LayoutParams(
-                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-
-        TextView countTxt = new TextView(ctx);
-        countTxt.setText((folderOk ? folder : "Obsidian") + " · " + total + " 条");
-        countTxt.setTextSize(12);
-        countTxt.setTextColor(UiKit.PAPER_MUTED);
-        countTxt.setFontFeatureSettings("tnum");
-        subbar.addView(countTxt);
-        content.addView(subbar);
-
-        // 2. Editorial Stream (grouped by 今天 / 更早)
-        List<Prefs.CaptureRecord> feed = Prefs.recentCaptures(ctx);
-        if (feed.isEmpty()) {
-            LinearLayout emptyBox = new LinearLayout(ctx);
-            emptyBox.setOrientation(LinearLayout.VERTICAL);
-            emptyBox.setPadding(UiKit.dp(ctx, 24), UiKit.dp(ctx, 48),
-                    UiKit.dp(ctx, 24), UiKit.dp(ctx, 32));
-
-            TextView eh = new TextView(ctx);
-            eh.setText("在 B 站、抖音、小红书或公众号\n复制链接，或点右上角「添加」。");
-            eh.setTextSize(18);
-            eh.setTypeface(Typeface.DEFAULT_BOLD);
-            eh.setTextColor(UiKit.PAPER_INK);
-            eh.setLineSpacing(UiKit.dp(ctx, 6), 1f);
-            emptyBox.addView(eh);
-
-            String last = Prefs.lastSaved(ctx);
-            TextView es = new TextView(ctx);
-            es.setText(last.isEmpty()
-                    ? "收纳后生成 Markdown，复制链接时可自动附上截图。"
-                    : "最近一次收纳：" + last);
-            es.setTextSize(13);
-            es.setTextColor(UiKit.PAPER_MUTED);
-            es.setLineSpacing(UiKit.dp(ctx, 5), 1f);
-            es.setPadding(0, UiKit.dp(ctx, 12), 0, UiKit.dp(ctx, 22));
-            emptyBox.addView(es);
-
-            TextView testBtn = UiKit.makePrimaryPill(ctx, "试一下收纳弹窗");
-            testBtn.setOnClickListener(new OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    UiKit.hapticTick(v);
-                    host.onTestPopup();
-                }
-            });
-            emptyBox.addView(testBtn, new LinearLayout.LayoutParams(
-                    UiKit.dp(ctx, 180), UiKit.dp(ctx, 48)));
-
-            content.addView(emptyBox);
-            return;
-        }
-
-        List<Prefs.CaptureRecord> todayList = new ArrayList<>();
-        List<Prefs.CaptureRecord> earlierList = new ArrayList<>();
-        long todayStart = startOfTodayMs();
-        for (Prefs.CaptureRecord rec : feed) {
-            if (rec.timeMs >= todayStart) todayList.add(rec);
-            else earlierList.add(rec);
-        }
-
-        if (!todayList.isEmpty()) {
-            content.addView(groupLabel(ctx, "今天", false));
-            for (Prefs.CaptureRecord rec : todayList) {
-                content.addView(buildStreamItem(ctx, rec, myGen));
-            }
-        }
-        if (!earlierList.isEmpty()) {
-            content.addView(groupLabel(ctx, "更早", !todayList.isEmpty()));
-            for (Prefs.CaptureRecord rec : earlierList) {
-                content.addView(buildStreamItem(ctx, rec, myGen));
-            }
-        }
-
-        TextView swipeHint = new TextView(ctx);
-        swipeHint.setText("点击查看详情或回原 App · 左滑同步删除仓库文件");
-        swipeHint.setTextSize(11);
-        swipeHint.setTextColor(UiKit.PAPER_MUTED);
-        swipeHint.setGravity(Gravity.CENTER);
-        swipeHint.setPadding(UiKit.dp(ctx, 24), UiKit.dp(ctx, 8), UiKit.dp(ctx, 24), 0);
-        content.addView(swipeHint);
-    }
-
-    private View groupLabel(Context ctx, String text, boolean extraTop) {
-        TextView tv = new TextView(ctx);
-        tv.setText(text);
-        tv.setTextSize(11);
-        tv.setTypeface(Typeface.DEFAULT_BOLD);
-        tv.setTextColor(UiKit.PAPER_MUTED);
-        tv.setLetterSpacing(0.06f);
-        tv.setPadding(UiKit.dp(ctx, 24), UiKit.dp(ctx, extraTop ? 20 : 6),
-                UiKit.dp(ctx, 24), UiKit.dp(ctx, 10));
-        return tv;
-    }
-
-    private View buildStreamItem(final Context ctx, final Prefs.CaptureRecord rec, final int gen) {
-        // Foreground row (opaque PAPER_BG so red delete pill stays cleanly hidden until swiped)
-        LinearLayout fgRow = new LinearLayout(ctx);
-        fgRow.setOrientation(LinearLayout.HORIZONTAL);
-        fgRow.setGravity(Gravity.CENTER_VERTICAL);
-        fgRow.setBackgroundColor(UiKit.PAPER_BG);
-        fgRow.setClipChildren(false);
-        fgRow.setClipToPadding(false);
-        fgRow.setPadding(UiKit.dp(ctx, 24), UiKit.dp(ctx, 2),
-                UiKit.dp(ctx, 24), UiKit.dp(ctx, 6));
-
-        // Left Thumbnail Frame (72 x 90dp rounded, soft shadow, zero border)
-        FrameLayout thumbWrap = new FrameLayout(ctx);
-        thumbWrap.setBackground(UiKit.roundRect(ctx, UiKit.PAPER_MUTED_BG, 16));
-        thumbWrap.setClipToOutline(true);
-        thumbWrap.setOutlineProvider(new ViewOutlineProvider() {
-            @Override
-            public void getOutline(View view, Outline outline) {
-                outline.setRoundRect(0, 0, view.getWidth(), view.getHeight(), UiKit.dpf(ctx, 16));
+        boolean accessibility = host.isAccessibilityEnabled();
+        updateStatus(overlay, accessibility, tree.isEmpty() ? "" : NoteWriter.FOLDER_NAME);
+        if (adapter.groups.isEmpty()) emptyLabel.setText("读取中…");
+        historyJob = HISTORY_EXEC.submit(() -> {
+            try {
+                String folder = NoteWriter.folderName(app);
+                List<Day> days = groupByDay(CaptureHistory.load(app), ZoneId.systemDefault());
+                main.post(() -> {
+                    if (generation != request) return;
+                    updateStatus(overlay, accessibility, folder);
+                    emptyLabel.setText("暂无收纳");
+                    showDays(days);
+                });
+            } catch (Exception error) {
+                main.post(() -> {
+                    if (generation != request) return;
+                    emptyLabel.setText("无法读取收纳目录");
+                    updateStatus(overlay, accessibility, "");
+                    if (!adapter.groups.isEmpty())
+                        Toast.makeText(ctx, "无法刷新收纳目录", Toast.LENGTH_SHORT).show();
+                });
             }
         });
-        UiKit.applySoftShadow(thumbWrap, 6, 0x2614120E);
+    }
 
-        UiKit.PlaceholderArtView art = new UiKit.PlaceholderArtView(ctx, rec.platform);
-        thumbWrap.addView(art, new LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+    @Override protected void onDetachedFromWindow() {
+        generation++;
+        if (historyJob != null) historyJob.cancel(true);
+        super.onDetachedFromWindow();
+    }
 
-        if (!rec.shotUri.isEmpty()) {
-            final ImageView img = new ImageView(ctx);
-            img.setScaleType(ImageView.ScaleType.CENTER_CROP);
-            img.setVisibility(View.GONE);
-            thumbWrap.addView(img, new LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-            loadThumbInto(ctx, rec.shotUri, img, gen);
+    private void updateStatus(boolean overlay, boolean accessibility, String folder) {
+        boolean ready = overlay && accessibility && NoteWriter.FOLDER_NAME.equals(folder);
+        statusDot.setBackground(UiKit.roundRect(getContext(), ready ? 0xFF24765A : UiKit.WARN_AMBER, 8));
+        statusLabel.setText(ready ? "自动收纳已开启" : "自动收纳待设置 ›");
+        statusLabel.setTextColor(ready ? UiKit.PAPER_INK : 0xFFA53822);
+        statusBar.setOnClickListener(ready ? null : v -> openSettingsSheet());
+        statusBar.setClickable(!ready);
+        folderLabel.setText(folder.isEmpty() ? "未选择" : folder);
+    }
+
+    private static final class Day {
+        final LocalDate date;
+        final List<Prefs.CaptureRecord> records = new ArrayList<>();
+        Day(LocalDate date) { this.date = date; }
+    }
+
+    private static List<Day> groupByDay(List<Prefs.CaptureRecord> records, ZoneId zone) {
+        // CaptureHistory returns captures in descending time order.
+        Map<LocalDate, Day> days = new LinkedHashMap<>();
+        for (Prefs.CaptureRecord item : records) {
+            LocalDate date = Instant.ofEpochMilli(item.timeMs).atZone(zone).toLocalDate();
+            days.computeIfAbsent(date, Day::new).records.add(item);
+        }
+        return new ArrayList<>(days.values());
+    }
+
+    private void showDays(List<Day> days) {
+        closeOpenedRow();
+        today = LocalDate.now();
+        adapter.groups = days;
+        adapter.notifyDataSetChanged();
+        LocalDate yesterday = today.minusDays(1);
+        for (int i = 0; i < days.size(); i++) {
+            LocalDate date = days.get(i).date;
+            boolean expanded = chosenExpansion.getOrDefault(date,
+                    date.equals(today) || date.equals(yesterday));
+            if (expanded != archive.isGroupExpanded(i)) {
+                if (expanded) archive.expandGroup(i);
+                else archive.collapseGroup(i);
+            }
+        }
+    }
+
+    private static TextView listText(Context ctx, int size, int color) {
+        TextView text = new TextView(ctx);
+        text.setTextSize(size);
+        text.setTextColor(color);
+        text.setSingleLine(true);
+        text.setEllipsize(TextUtils.TruncateAt.END);
+        return text;
+    }
+
+    private final class DayHeader extends LinearLayout {
+        final TextView name, count, arrow;
+        DayHeader(Context ctx) {
+            super(ctx);
+            int inset = UiKit.dp(ctx, 14);
+            setPadding(inset, UiKit.dp(ctx, 3), inset, UiKit.dp(ctx, 3));
+            LinearLayout band = new LinearLayout(ctx);
+            band.setGravity(Gravity.CENTER_VERTICAL);
+            band.setPadding(UiKit.dp(ctx, 10), 0, UiKit.dp(ctx, 10), 0);
+            band.setBackground(UiKit.roundRect(ctx, 0xFFECE9E1, 5));
+            band.setMinimumHeight(UiKit.dp(ctx, 36));
+            addView(band, new LinearLayout.LayoutParams(-1, -2));
+            name = listText(ctx, 15, UiKit.PAPER_INK);
+            name.setTypeface(Typeface.DEFAULT_BOLD);
+            count = listText(ctx, 13, UiKit.PAPER_SECOND);
+            arrow = listText(ctx, 19, UiKit.PAPER_SECOND);
+            arrow.setGravity(Gravity.CENTER);
+            band.addView(name, new LinearLayout.LayoutParams(0, -2, 1));
+            band.addView(count);
+            band.addView(arrow, new LinearLayout.LayoutParams(UiKit.dp(ctx, 24), -2));
         }
 
-        LinearLayout.LayoutParams tLp = new LinearLayout.LayoutParams(
-                UiKit.dp(ctx, 72), UiKit.dp(ctx, 90));
-        tLp.rightMargin = UiKit.dp(ctx, 15);
-        fgRow.addView(thumbWrap, tLp);
+        void bind(Day day, boolean expanded) {
+            LocalDate date = day.date;
+            String prefix = date.equals(today) ? "今天 · " : date.equals(today.minusDays(1)) ? "昨天 · " : "";
+            name.setText(prefix + (date.getYear() == today.getYear() ? MONTH_DAY : FULL_DATE).format(date));
+            count.setText(day.records.size() + " 条");
+            arrow.setText("›");
+            arrow.setRotation(expanded ? 90f : 0f);
+            arrow.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        }
+    }
 
-        // Right Editorial Copy
-        LinearLayout body = new LinearLayout(ctx);
-        body.setOrientation(LinearLayout.VERTICAL);
+    private final class ArchiveAdapter extends BaseExpandableListAdapter {
+        List<Day> groups = new ArrayList<>();
+        @Override public int getGroupCount() { return groups.size(); }
+        @Override public int getChildrenCount(int group) { return getGroup(group).records.size(); }
+        @Override public Day getGroup(int group) { return groups.get(group); }
+        @Override public Prefs.CaptureRecord getChild(int group, int child) {
+            return getGroup(group).records.get(child);
+        }
+        @Override public long getGroupId(int group) { return getGroup(group).date.toEpochDay(); }
+        @Override public long getChildId(int group, int child) {
+            return getChild(group, child).fileName.hashCode() & 0xffffffffL;
+        }
+        @Override public boolean hasStableIds() { return true; }
+        @Override public boolean isChildSelectable(int group, int child) { return true; }
 
-        TextView title = new TextView(ctx);
-        title.setText(rec.title.isEmpty() ? rec.fileName : rec.title);
-        title.setTextSize(15);
-        title.setTypeface(Typeface.DEFAULT_BOLD);
-        title.setTextColor(UiKit.PAPER_INK);
-        title.setLineSpacing(UiKit.dp(ctx, 4), 1f);
-        title.setMaxLines(2);
-        title.setEllipsize(TextUtils.TruncateAt.END);
-        body.addView(title);
+        @Override public View getGroupView(int group, boolean expanded, View reuse, ViewGroup parent) {
+            DayHeader header = reuse instanceof DayHeader ? (DayHeader) reuse : new DayHeader(getContext());
+            header.bind(getGroup(group), expanded);
+            return header;
+        }
 
-        LinearLayout meta = new LinearLayout(ctx);
-        meta.setOrientation(LinearLayout.HORIZONTAL);
-        meta.setGravity(Gravity.CENTER_VERTICAL);
-        LinearLayout.LayoutParams mLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        mLp.topMargin = UiKit.dp(ctx, 7);
+        @Override public View getChildView(int group, int child, boolean last, View reuse, ViewGroup parent) {
+            SwipeDeleteRow row = reuse instanceof SwipeDeleteRow ? (SwipeDeleteRow) reuse : null;
+            Context ctx = getContext();
+            if (row == null) {
+                RecordLine line = new RecordLine(ctx);
+                row = new SwipeDeleteRow(ctx, line,
+                        v -> openDetailSheet(ctx, line.record),
+                        v -> deleteRecordFromRow(ctx, line.record, (SwipeDeleteRow) v.getParent(), (TextView) v));
+            }
+            RecordLine line = (RecordLine) row.fgView;
+            Prefs.CaptureRecord record = getChild(group, child);
+            if (line.record != record) {
+                row.close(false);
+                line.bind(record);
+                row.setContentDescription(line.title.getText() + "，" + line.source.getText()
+                        + "，" + line.clock.getText());
+            } else {
+                line.ensureThumbnail();
+            }
+            row.showDeleting(deletingFiles.contains(record.docUri + record.fileName));
+            return row;
+        }
+    }
 
-        View pdot = new View(ctx);
-        pdot.setBackground(UiKit.roundRect(ctx, platformDotColor(rec.platform), 999));
-        LinearLayout.LayoutParams pdLp = new LinearLayout.LayoutParams(
-                UiKit.dp(ctx, 6), UiKit.dp(ctx, 6));
-        pdLp.rightMargin = UiKit.dp(ctx, 6);
-        meta.addView(pdot, pdLp);
+    private final class RecordLine extends LinearLayout {
+        final FrameLayout thumb;
+        final ImageView image;
+        final TextView title, source, clock;
+        Prefs.CaptureRecord record;
+        Future<?> thumbnailJob;
 
-        TextView metaText = new TextView(ctx);
-        metaText.setText(NoteWriter.platformLabel(rec.platform) + " · " + formatRelTime(rec.timeMs));
-        metaText.setTextSize(12);
-        metaText.setTextColor(UiKit.PAPER_MUTED);
-        metaText.setFontFeatureSettings("tnum");
-        meta.addView(metaText);
+        RecordLine(Context ctx) {
+            super(ctx);
+            setOrientation(VERTICAL);
+            setBackgroundColor(UiKit.PAPER_BG);
+            int pad = UiKit.dp(ctx, 20);
+            setPadding(pad, 0, pad, 0);
+            LinearLayout line = new LinearLayout(ctx);
+            line.setMinimumHeight(UiKit.dp(ctx, 56));
+            line.setGravity(Gravity.CENTER_VERTICAL);
+            addView(line, new LinearLayout.LayoutParams(-1, -2));
+            thumb = new FrameLayout(ctx);
+            thumb.setBackground(UiKit.roundRect(ctx, UiKit.PAPER_MUTED_BG, 5));
+            thumb.setClipToOutline(true);
+            LinearLayout.LayoutParams square = new LinearLayout.LayoutParams(UiKit.dp(ctx, 38), UiKit.dp(ctx, 38));
+            square.rightMargin = UiKit.dp(ctx, 11);
+            line.addView(thumb, square);
+            image = new ImageView(ctx);
+            image.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            thumb.addView(image, new FrameLayout.LayoutParams(-1, -1));
+            LinearLayout copy = new LinearLayout(ctx);
+            copy.setOrientation(VERTICAL);
+            title = listText(ctx, 15, UiKit.PAPER_INK);
+            title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+            source = listText(ctx, 12, UiKit.PAPER_SECOND);
+            copy.addView(title);
+            copy.addView(source);
+            line.addView(copy, new LinearLayout.LayoutParams(0, -2, 1));
+            clock = listText(ctx, 12, UiKit.PAPER_SECOND);
+            clock.setFontFeatureSettings("tnum");
+            clock.setPadding(UiKit.dp(ctx, 7), 0, 0, 0);
+            line.addView(clock);
+            View rule = new View(ctx);
+            rule.setBackgroundColor(0xFFDEDAD3);
+            addView(rule, new LinearLayout.LayoutParams(-1, 1));
+        }
 
-        body.addView(meta, mLp);
-        fgRow.addView(body, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        void bind(Prefs.CaptureRecord next) {
+            cancelThumbnail();
+            if (record == null || !record.platform.equals(next.platform)) {
+                if (thumb.getChildCount() > 1) thumb.removeViewAt(0);
+                thumb.addView(new UiKit.PlaceholderArtView(getContext(), next.platform),
+                        0, new FrameLayout.LayoutParams(-1, -1));
+            }
+            record = next;
+            ArchiveCopy copy = new ArchiveCopy(next.title, next.platform, NoteWriter.platformLabel(next.platform));
+            title.setText(copy.title);
+            source.setText(copy.source);
+            clock.setText(CLOCK.format(Instant.ofEpochMilli(next.timeMs).atZone(ZoneId.systemDefault())));
+            image.setImageDrawable(null);
+            ensureThumbnail();
+        }
 
-        final SwipeDeleteRow swipeRow = new SwipeDeleteRow(ctx, fgRow,
-                new OnClickListener() {
-                    @Override
-                    public void onClick(View v) {
-                        openDetailSheet(ctx, rec);
-                    }
-                },
-                new OnClickListener() {
-                    @Override
-                    public void onClick(View v) {
-                        deleteRecordFromRow(ctx, rec, (SwipeDeleteRow) v.getParent(), (TextView) v);
-                    }
+        void cancelThumbnail() {
+            if (thumbnailJob != null) thumbnailJob.cancel(true);
+            thumbnailJob = null;
+        }
+
+        void ensureThumbnail() {
+            String uri = record.shotUri;
+            if (uri.isEmpty() || image.getDrawable() != null || thumbnailJob != null) return;
+            Bitmap cached = thumbnails.get(uri);
+            if (cached != null) {
+                image.setImageBitmap(cached);
+                return;
+            }
+            Context app = getContext().getApplicationContext();
+            final Prefs.CaptureRecord requested = record;
+            int target = UiKit.dp(app, 48);
+            thumbnailJob = THUMB_EXEC.submit(() -> {
+                Bitmap bitmap;
+                try {
+                    bitmap = app.getContentResolver().loadThumbnail(Uri.parse(uri),
+                            new android.util.Size(target, target), null);
+                } catch (Exception ignored) {
+                    if (Thread.currentThread().isInterrupted()) return;
+                    bitmap = decodeBoundedBitmap(app, Uri.parse(uri), target * 2);
+                }
+                if (bitmap == null || Thread.currentThread().isInterrupted()) return;
+                thumbnails.put(uri, bitmap);
+                main.post(() -> {
+                    if (record == requested) image.setImageBitmap(thumbnails.get(uri));
                 });
-        LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        rowLp.bottomMargin = UiKit.dp(ctx, 12);
-        swipeRow.setLayoutParams(rowLp);
-        return swipeRow;
+            });
+        }
     }
 
     /** 点击灵感条目弹出详情抽屉：可阅读仓库里的完整内容、查看大图截图、跳转回原 App 或复制链接。 */
@@ -457,7 +555,7 @@ public final class InboxView extends FrameLayout {
 
         final TextView fileFoot = new TextView(ctx);
         String folder = NoteWriter.folderName(ctx);
-        fileFoot.setText((folder.isEmpty() ? "00-Inbox" : folder) + "/" + rec.fileName);
+        fileFoot.setText((folder.isEmpty() ? NoteWriter.FOLDER_NAME : folder) + "/" + rec.fileName);
         fileFoot.setTextSize(11);
         fileFoot.setTextColor(UiKit.PAPER_MUTED);
         fileFoot.setTypeface(Typeface.MONOSPACE);
@@ -640,7 +738,7 @@ public final class InboxView extends FrameLayout {
                             bodyText.setText(detail.body);
                         }
                         if (!detail.foundInVault) {
-                            fileFoot.setText(rec.fileName + " · 当前不在 00-Inbox");
+                            fileFoot.setText(rec.fileName + " · 当前不在收纳目录");
                         }
                         if ("done".equalsIgnoreCase(detail.status)) {
                             statusBadge.setText("已整理");
@@ -798,69 +896,30 @@ public final class InboxView extends FrameLayout {
         return new SimpleDateFormat("M/d HH:mm", Locale.US).format(new Date(ms));
     }
 
-    private void deleteRecordFromRow(final Context ctx, final Prefs.CaptureRecord rec,
-                                     final SwipeDeleteRow row, final TextView delBtn) {
-        if (row.deleting) return;
-        row.deleting = true;
-        delBtn.setEnabled(false);
-        delBtn.setText("删除中");
-        delBtn.setAlpha(0.75f);
-        UiKit.hapticConfirm(ctx, delBtn);
+    private final java.util.Set<String> deletingFiles = new java.util.HashSet<>();
 
-        final Context appCtx = ctx.getApplicationContext();
-        DELETE_EXEC.execute(new Runnable() {
-            @Override
-            public void run() {
-                final NoteWriter.DeleteResult res = NoteWriter.deleteCapture(appCtx, rec);
-                if (res.error == null) {
-                    Prefs.removeCapture(appCtx, rec);
+    private void deleteRecordFromRow(Context ctx, Prefs.CaptureRecord rec, SwipeDeleteRow row, TextView button) {
+        if (!deletingFiles.add(rec.docUri + rec.fileName)) return;
+        row.showDeleting(true);
+        UiKit.hapticConfirm(ctx, button);
+        Context app = ctx.getApplicationContext();
+        DELETE_EXEC.execute(() -> {
+            NoteWriter.DeleteResult result = NoteWriter.deleteCapture(app, rec);
+            if (result.error == null) Prefs.removeCapture(app, rec);
+            main.post(() -> {
+                deletingFiles.remove(rec.docUri + rec.fileName);
+                if (!isAttachedToWindow()) return;
+                if (((RecordLine) row.fgView).record == rec) {
+                    row.showDeleting(false);
+                    row.close(false);
                 }
-                main.post(new Runnable() {
-                    @Override
-                    public void run() {
-                        if (res.error != null) {
-                            row.deleting = false;
-                            delBtn.setEnabled(true);
-                            delBtn.setText("删除");
-                            delBtn.setAlpha(1f);
-                            row.close(true);
-                            Toast.makeText(appCtx, res.error, Toast.LENGTH_LONG).show();
-                            return;
-                        }
-
-                        String msg;
-                        if (res.mdDeleted && res.shotDeleted) {
-                            msg = "已同步删除笔记与截图";
-                        } else if (res.mdDeleted) {
-                            msg = "已同步删除仓库笔记";
-                        } else if (res.shotDeleted) {
-                            msg = "笔记已不在仓库，已清理截图并移出列表";
-                        } else {
-                            msg = "仓库中已无此文件，已从列表移除";
-                        }
-                        Toast.makeText(appCtx, msg, Toast.LENGTH_SHORT).show();
-
-                        if (!isAttachedToWindow()) return;
-                        if (openedRow == row) {
-                            openedRow = null;
-                        }
-                        row.animate()
-                                .alpha(0f)
-                                .translationX(-UiKit.dp(ctx, 48))
-                                .setDuration(170)
-                                .setInterpolator(new DecelerateInterpolator())
-                                .withEndAction(new Runnable() {
-                                    @Override
-                                    public void run() {
-                                        if (isAttachedToWindow()) {
-                                            refresh();
-                                        }
-                                    }
-                                })
-                                .start();
-                    }
-                });
-            }
+                if (result.error != null) {
+                    Toast.makeText(app, result.error, Toast.LENGTH_LONG).show();
+                    adapter.notifyDataSetChanged();
+                } else {
+                    refresh();
+                }
+            });
         });
     }
 
@@ -888,9 +947,10 @@ public final class InboxView extends FrameLayout {
             super(ctx);
             this.fgView = fgView;
             this.onRowClick = onRowClick;
+            setOnClickListener(v -> onRowClick.onClick(fgView));
             this.touchSlop = ViewConfiguration.get(ctx).getScaledTouchSlop();
             int actionW = UiKit.dp(ctx, 76);
-            int rightMargin = UiKit.dp(ctx, 24);
+            int rightMargin = UiKit.dp(ctx, 20);
             int gap = UiKit.dp(ctx, 4);
             this.revealPx = actionW + rightMargin + gap;
             this.actionRightHitPx = actionW + rightMargin;
@@ -912,9 +972,8 @@ public final class InboxView extends FrameLayout {
             deleteBtn.setScaleX(0.88f);
             deleteBtn.setScaleY(0.88f);
 
-            LayoutParams delLp = new LayoutParams(actionW, UiKit.dp(ctx, 90));
-            delLp.gravity = Gravity.END | Gravity.TOP;
-            delLp.topMargin = UiKit.dp(ctx, 2);
+            LayoutParams delLp = new LayoutParams(actionW, UiKit.dp(ctx, 44));
+            delLp.gravity = Gravity.END | Gravity.CENTER_VERTICAL;
             delLp.rightMargin = rightMargin;
             addView(deleteBtn, delLp);
 
@@ -933,6 +992,13 @@ public final class InboxView extends FrameLayout {
                 velocityTracker.recycle();
                 velocityTracker = null;
             }
+        }
+
+        void showDeleting(boolean active) {
+            if (deleting == active) return;
+            deleting = active;
+            deleteBtn.setEnabled(!active);
+            deleteBtn.setText(active ? "删除中" : "删除");
         }
 
         private boolean isOpen() {
@@ -1145,180 +1211,139 @@ public final class InboxView extends FrameLayout {
         }
     }
 
-    private void loadThumbInto(final Context ctx, final String uriStr,
-                               final ImageView target, final int gen) {
-        THUMB_EXEC.execute(new Runnable() {
-            @Override
-            public void run() {
-                Bitmap bmp = null;
-                try {
-                    Uri uri = Uri.parse(uriStr);
-                    BitmapFactory.Options bounds = new BitmapFactory.Options();
-                    bounds.inJustDecodeBounds = true;
-                    try (InputStream is = ctx.getContentResolver().openInputStream(uri)) {
-                        if (is != null) BitmapFactory.decodeStream(is, null, bounds);
-                    }
-                    int sample = 1;
-                    int minSide = Math.min(bounds.outWidth, bounds.outHeight);
-                    if (minSide <= 0) return;
-                    while (minSide / (sample * 2) >= 220) sample *= 2;
-                    BitmapFactory.Options opts = new BitmapFactory.Options();
-                    opts.inSampleSize = sample;
-                    try (InputStream is = ctx.getContentResolver().openInputStream(uri)) {
-                        if (is != null) bmp = BitmapFactory.decodeStream(is, null, opts);
-                    }
-                } catch (Exception ignored) {
-                }
-                final Bitmap result = bmp;
-                if (result != null) {
-                    main.post(new Runnable() {
-                        @Override
-                        public void run() {
-                            if (renderGeneration == gen && isAttachedToWindow()) {
-                                target.setImageBitmap(result);
-                                target.setVisibility(View.VISIBLE);
-                            } else {
-                                result.recycle();
-                            }
-                        }
-                    });
-                }
-            }
-        });
-    }
 
     public void openSettingsSheet() {
-        final Context ctx = getContext();
-        final Dialog dlg = new Dialog(ctx);
-        dlg.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        Context ctx = getContext();
+        Dialog dialog = new Dialog(ctx);
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
 
-        LinearLayout root = new LinearLayout(ctx);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(UiKit.dp(ctx, 24), UiKit.dp(ctx, 12),
-                UiKit.dp(ctx, 24), UiKit.dp(ctx, 28));
-        root.setBackground(UiKit.topRoundSheet(ctx, 0xFFFAF9F6, 32));
+        ScrollView sheet = new ScrollView(ctx);
+        sheet.setBackground(UiKit.topRoundSheet(ctx, 0xFFFAF9F6, 24));
+        sheet.setVerticalScrollBarEnabled(false);
+        LinearLayout rows = new LinearLayout(ctx);
+        rows.setOrientation(LinearLayout.VERTICAL);
+        rows.setPadding(UiKit.dp(ctx, 20), UiKit.dp(ctx, 10),
+                UiKit.dp(ctx, 20), UiKit.dp(ctx, 12));
+        sheet.addView(rows);
 
         View handle = new View(ctx);
-        handle.setBackground(UiKit.roundRect(ctx, 0xFFDFDCD5, 999));
-        LinearLayout.LayoutParams hLp = new LinearLayout.LayoutParams(
-                UiKit.dp(ctx, 36), UiKit.dp(ctx, 4));
-        hLp.gravity = Gravity.CENTER_HORIZONTAL;
-        hLp.bottomMargin = UiKit.dp(ctx, 18);
-        root.addView(handle, hLp);
+        handle.setBackground(UiKit.roundRect(ctx, 0xFFCFCCC6, 2));
+        LinearLayout.LayoutParams handleSize = new LinearLayout.LayoutParams(
+                UiKit.dp(ctx, 32), UiKit.dp(ctx, 4));
+        handleSize.gravity = Gravity.CENTER_HORIZONTAL;
+        rows.addView(handle, handleSize);
 
-        TextView head = new TextView(ctx);
-        head.setText("收纳设置");
-        head.setTextSize(20);
-        head.setTypeface(Typeface.DEFAULT_BOLD);
-        head.setTextColor(UiKit.PAPER_INK);
-        root.addView(head);
-
-        TextView sub = new TextView(ctx);
-        sub.setText("全部本地保存 · 不联网、不上传");
-        sub.setTextSize(12);
-        sub.setTextColor(UiKit.PAPER_MUTED);
-        sub.setPadding(0, UiKit.dp(ctx, 4), 0, UiKit.dp(ctx, 16));
-        root.addView(sub);
+        TextView heading = new TextView(ctx);
+        heading.setText("收纳设置");
+        heading.setTextSize(22);
+        heading.setTypeface(Typeface.create("serif", Typeface.BOLD));
+        heading.setTextColor(UiKit.PAPER_INK);
+        heading.setPadding(0, UiKit.dp(ctx, 14), 0, UiKit.dp(ctx, 8));
+        heading.setAccessibilityHeading(true);
+        rows.addView(heading);
 
         boolean overlay = Settings.canDrawOverlays(ctx);
         boolean access = host.isAccessibilityEnabled();
         String folder = NoteWriter.folderName(ctx);
-        boolean folderOk = !folder.isEmpty();
-
-        root.addView(settingRow(ctx, "悬浮窗权限",
-                overlay ? "已开启" : "去开启 ›",
-                overlay ? UiKit.OK_GREEN : UiKit.CORAL_ACCENT,
-                new OnClickListener() {
-                    @Override public void onClick(View v) { dlg.dismiss(); host.onOpenOverlaySettings(); }
-                }));
-        root.addView(thinDivider(ctx));
-
-        root.addView(settingRow(ctx, "无障碍监听",
-                access ? "已开启" : "去开启 ›",
-                access ? UiKit.OK_GREEN : UiKit.CORAL_ACCENT,
-                new OnClickListener() {
-                    @Override public void onClick(View v) { dlg.dismiss(); host.onOpenAccessibilitySettings(); }
-                }));
-        root.addView(thinDivider(ctx));
-
-        root.addView(settingRow(ctx, "防掉线（后台耗电设置）",
-                "去设为不限制 ›", UiKit.PAPER_SECOND,
-                new OnClickListener() {
-                    @Override public void onClick(View v) { dlg.dismiss(); host.onOpenBatterySettings(); }
-                }));
-        root.addView(thinDivider(ctx));
-
-        root.addView(settingRow(ctx, "Obsidian Inbox 目录",
-                folderOk ? folder + " ›" : "去选择 ›",
-                folderOk ? UiKit.PAPER_SECOND : UiKit.CORAL_ACCENT,
-                new OnClickListener() {
-                    @Override public void onClick(View v) { dlg.dismiss(); host.onPickFolder(); }
-                }));
-        root.addView(thinDivider(ctx));
-
-        root.addView(settingRow(ctx, "试一下收纳弹窗",
-                "弹出预览 ›", UiKit.PAPER_SECOND,
-                new OnClickListener() {
-                    @Override public void onClick(View v) { dlg.dismiss(); host.onTestPopup(); }
-                }));
-
+        boolean folderAvailable = NoteWriter.FOLDER_NAME.equals(folder);
+        final int enabled = 0xFF187751;
+        final int action = 0xFFAD432C;
+        addSetting(rows, dialog, "overlay", "悬浮窗权限", overlay ? "已开启" : "去开启",
+                overlay ? enabled : action, host::onOpenOverlaySettings, false);
+        addSetting(rows, dialog, "accessibility", "无障碍监听", access ? "已开启" : "去开启",
+                access ? enabled : action, host::onOpenAccessibilitySettings, true);
+        boolean batteryExempt = SyncPowerSettings.isExempt(ctx);
+        addSetting(rows, dialog, "battery", "后台运行", batteryExempt ? "已关闭电池优化" : "去设置",
+                batteryExempt ? enabled : UiKit.PAPER_SECOND, host::onOpenBatterySettings, true);
+        addSetting(rows, dialog, "folder", "收纳目录", folderAvailable ? folder : "选择目录",
+                folderAvailable ? UiKit.PAPER_SECOND : action, host::onPickFolder, true);
+        addSetting(rows, dialog, "computer", "连接电脑", SyncPairing.summary(ctx),
+                UiKit.PAPER_SECOND, host::onConnectComputer, true);
+        String installedVersion;
+        try {
+            installedVersion = ctx.getPackageManager().getPackageInfo(ctx.getPackageName(), 0).versionName;
+        } catch (android.content.pm.PackageManager.NameNotFoundException e) {
+            installedVersion = "";
+        }
+        addSetting(rows, dialog, "update", "检查更新", installedVersion,
+                UiKit.PAPER_SECOND, host::onCheckUpdate, true);
+        addSetting(rows, dialog, "preview", "弹窗预览", "",
+                UiKit.PAPER_SECOND, host::onTestPopup, true);
         if (host.isOldInstalled()) {
-            root.addView(thinDivider(ctx));
-            root.addView(settingRow(ctx, "清理旧版「灵感收纳」",
-                    "去卸载 ›", UiKit.DANGER_RED,
-                    new OnClickListener() {
-                        @Override public void onClick(View v) { dlg.dismiss(); host.onCleanupOldVersion(); }
-                    }));
+            addSetting(rows, dialog, "remove", "清理旧版", "去卸载",
+                    UiKit.DANGER_RED, host::onCleanupOldVersion, true);
         }
 
-        dlg.setContentView(root);
-        Window w = dlg.getWindow();
-        if (w != null) {
-            w.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
-            w.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            w.setGravity(Gravity.BOTTOM);
-            w.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
-            w.setDimAmount(0.32f);
+        dialog.setContentView(sheet);
+        Window window = dialog.getWindow();
+        if (window != null) {
+            window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+            window.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            window.setGravity(Gravity.BOTTOM);
+            window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+            window.setDimAmount(0.38f);
         }
-        dlg.show();
+        dialog.show();
     }
 
-    private View settingRow(Context ctx, String title, String value, int valueColor,
-                            OnClickListener click) {
+    private void addSetting(LinearLayout rows, Dialog dialog, String icon, String title, String value,
+                            int valueColor, Runnable action, boolean dividerBefore) {
+        Context ctx = rows.getContext();
+        if (dividerBefore) {
+            View rule = new View(ctx);
+            rule.setBackgroundColor(0xFFDEDBD6);
+            rows.addView(rule, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1));
+        }
+
         LinearLayout row = new LinearLayout(ctx);
-        row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setMinimumHeight(UiKit.dp(ctx, 54));
-        row.setOnClickListener(new OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                UiKit.hapticTick(v);
-                click.onClick(v);
-            }
+        row.setMinimumHeight(UiKit.dp(ctx, 48));
+        row.setPadding(0, UiKit.dp(ctx, 6), 0, UiKit.dp(ctx, 6));
+        row.setBackground(new android.graphics.drawable.RippleDrawable(
+                android.content.res.ColorStateList.valueOf(0x14000000), null,
+                UiKit.roundRect(ctx, Color.WHITE, 5)));
+        row.setFocusable(true);
+        row.setContentDescription(TextUtils.isEmpty(value) ? title : title + "，" + value);
+        row.setOnClickListener(v -> {
+            UiKit.hapticTick(v);
+            dialog.dismiss();
+            action.run();
         });
+        ImageView glyph = new ImageView(ctx);
+        glyph.setImageResource(ctx.getResources().getIdentifier(
+                "setting_" + icon, "drawable", ctx.getPackageName()));
+        glyph.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        int size = UiKit.dp(ctx, 19);
+        LinearLayout.LayoutParams iconSize = new LinearLayout.LayoutParams(size, size);
+        iconSize.rightMargin = UiKit.dp(ctx, 13);
+        row.addView(glyph, iconSize);
 
-        TextView l = new TextView(ctx);
-        l.setText(title);
-        l.setTextSize(15);
-        l.setTypeface(Typeface.DEFAULT_BOLD);
-        l.setTextColor(UiKit.PAPER_INK);
-        row.addView(l, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        TextView label = new TextView(ctx);
+        label.setText(title);
+        label.setTextColor(UiKit.PAPER_INK);
+        label.setTextSize(16);
+        label.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        row.addView(label, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
-        TextView r = new TextView(ctx);
-        r.setText(value);
-        r.setTextSize(13);
-        r.setTypeface(Typeface.DEFAULT_BOLD);
-        r.setTextColor(valueColor);
-        row.addView(r);
-        return row;
-    }
-
-    private View thinDivider(Context ctx) {
-        View v = new View(ctx);
-        v.setBackgroundColor(UiKit.PAPER_DIVIDER);
-        v.setLayoutParams(new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, UiKit.dp(ctx, 1)));
-        return v;
+        if (!TextUtils.isEmpty(value)) {
+            TextView state = new TextView(ctx);
+            state.setText(value);
+            state.setTextColor(valueColor);
+            state.setTextSize(14);
+            state.setGravity(Gravity.END);
+            state.setMaxWidth(ctx.getResources().getDisplayMetrics().widthPixels / 3);
+            state.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+            row.addView(state);
+        }
+        ImageView arrow = new ImageView(ctx);
+        arrow.setImageResource(ctx.getResources().getIdentifier(
+                "setting_chevron", "drawable", ctx.getPackageName()));
+        arrow.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        int arrowSize = UiKit.dp(ctx, 15);
+        LinearLayout.LayoutParams arrowParams = new LinearLayout.LayoutParams(arrowSize, arrowSize);
+        arrowParams.leftMargin = UiKit.dp(ctx, 6);
+        row.addView(arrow, arrowParams);
+        rows.addView(row);
     }
 
     public static int platformDotColor(String platform) {
@@ -1329,21 +1354,4 @@ public final class InboxView extends FrameLayout {
         return UiKit.CORAL_END;
     }
 
-    private static long startOfTodayMs() {
-        Calendar cal = Calendar.getInstance();
-        cal.set(Calendar.HOUR_OF_DAY, 0);
-        cal.set(Calendar.MINUTE, 0);
-        cal.set(Calendar.SECOND, 0);
-        cal.set(Calendar.MILLISECOND, 0);
-        return cal.getTimeInMillis();
-    }
-
-    private static String formatRelTime(long ms) {
-        if (ms <= 0) return "";
-        long diff = Math.max(0, System.currentTimeMillis() - ms);
-        if (diff < 60_000L) return "刚刚";
-        if (diff < 3_600_000L) return (diff / 60_000L) + " 分钟前";
-        if (diff < 86_400_000L) return new SimpleDateFormat("HH:mm", Locale.US).format(new Date(ms));
-        return new SimpleDateFormat("M/d", Locale.US).format(new Date(ms));
-    }
 }

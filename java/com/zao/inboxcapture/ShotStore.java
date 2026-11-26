@@ -1,19 +1,17 @@
 package com.zao.inboxcapture;
 
 import android.content.ContentResolver;
-import android.content.Context;
 import android.net.Uri;
 import android.provider.DocumentsContract;
 
-/** 删除截图的 SAF 文档；不依赖 Android 11 的截图 API。 */
+/** 清理缓存截图和未完成写入的文件。 */
 public final class ShotStore {
     private ShotStore() {}
 
-    public static void delete(Context context, CapturedShot shot) {
-        if (shot == null) {
-            return;
+    public static void delete(CapturedShot shot) {
+        if (shot != null) {
+            shot.file.delete();
         }
-        deleteUri(context.getContentResolver(), shot.uri);
     }
 
     static void deleteUri(ContentResolver resolver, Uri uri) {
