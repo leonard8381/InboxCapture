@@ -1,14 +1,25 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.zao.inspirationbox"
-    android:versionCode="13"
-    android:versionName="0.11">
+    android:versionCode="23"
+    android:versionName="0.15-test">
 
     <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="34" />
 
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.UPDATE_PACKAGES_WITHOUT_USER_ACTION" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
 
     <queries>
         <package android:name="com.zao.inboxcapture" />
@@ -16,10 +27,13 @@
         <package android:name="com.ss.android.ugc.aweme" />
         <package android:name="com.ss.android.ugc.aweme.lite" />
         <package android:name="com.tencent.mm" />
+        <package android:name="tv.danmaku.bili" />
     </queries>
 
     <application
         android:allowBackup="false"
+        android:extractNativeLibs="true"
+        android:requestLegacyExternalStorage="true"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher"
         android:label="@string/app_name"
@@ -46,5 +60,11 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/accessibility_service_config" />
         </service>
+        <activity android:name="com.zao.inboxcapture.ComputerSyncActivity" android:exported="false" />
+        <service android:name="com.zao.inboxcapture.SyncService" android:exported="false"
+            android:foregroundServiceType="dataSync" />
+        <receiver
+            android:name="com.zao.inboxcapture.UpdateInstallReceiver"
+            android:exported="false" />
     </application>
 </manifest>

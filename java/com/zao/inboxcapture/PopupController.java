@@ -81,6 +81,7 @@ public final class PopupController {
             return;
         }
         if (!force && !shouldShow(forcedText)) {
+            ShotStore.delete(shot);
             return;
         }
         final String hash = forcedText == null ? null : clipHash(forcedText);
@@ -88,16 +89,18 @@ public final class PopupController {
         if (currentView != null && currentShot != null && currentShot != shot) {
             final CapturedShot staleShot = currentShot;
             IO_EXEC.execute(new Runnable() {
-                @Override public void run() { ShotStore.delete(app, staleShot); }
+                @Override public void run() { ShotStore.delete(staleShot); }
             });
         }
         if (!Settings.canDrawOverlays(app)) {
             Toast.makeText(app, "请先在「灵感」里开启悬浮窗权限", Toast.LENGTH_LONG).show();
+            ShotStore.delete(shot);
             return;
         }
         dismissCurrent();
         final WindowManager wm = (WindowManager) app.getSystemService(Context.WINDOW_SERVICE);
         if (wm == null) {
+            ShotStore.delete(shot);
             return;
         }
 
@@ -182,7 +185,7 @@ public final class PopupController {
                 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         card.addView(body);
 
-        // Action Row: [ 忽略 (quiet text) ]   [ 收纳到 Inbox (coral pill) ]
+        // Action Row: [ 忽略 (quiet text) ]   [ 收纳到 test (coral pill) ]
         LinearLayout row = new LinearLayout(app);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
@@ -204,7 +207,7 @@ public final class PopupController {
         ignoreLp.rightMargin = UiKit.dp(app, 12);
         row.addView(ignore, ignoreLp);
 
-        final TextView save = UiKit.makePrimaryPill(app, "收纳到 Inbox");
+        final TextView save = UiKit.makePrimaryPill(app, "收纳到 test");
         save.setMinHeight(UiKit.dp(app, 52));
         save.setTextSize(15);
         save.setAlpha(0.55f);
@@ -247,6 +250,7 @@ public final class PopupController {
             wm.addView(wrapper, params);
         } catch (Exception exc) {
             Toast.makeText(app, "悬浮窗打开失败，请检查悬浮窗权限", Toast.LENGTH_LONG).show();
+            ShotStore.delete(shot);
             return;
         }
         currentView = wrapper;
@@ -256,8 +260,8 @@ public final class PopupController {
         wrapper.requestFocus();
         card.requestFocus();
 
-        if (shot != null && shot.uri != null) {
-            loadThumbAsync(app, shot.uri, thumb, wrapper);
+        if (shot != null) {
+            loadThumbAsync(app, Uri.fromFile(shot.file), thumb, wrapper);
         }
 
         // Spring entrance
@@ -272,7 +276,7 @@ public final class PopupController {
             public void run() {
                 if (shot != null) {
                     IO_EXEC.execute(new Runnable() {
-                        @Override public void run() { ShotStore.delete(app, shot); }
+                        @Override public void run() { ShotStore.delete(shot); }
                     });
                 }
                 markDismissed(clipboardText[0]);
@@ -330,7 +334,7 @@ public final class PopupController {
                 bindText(app, text, shot != null, platDot, tagTxt, preview, save, ignore, wrapper);
                 if (NoteWriter.findSupportedUrl(text) == null && shot != null) {
                     IO_EXEC.execute(new Runnable() {
-                        @Override public void run() { ShotStore.delete(app, shot); }
+                        @Override public void run() { ShotStore.delete(shot); }
                     });
                     thumb.setVisibility(View.GONE);
                 }
@@ -369,15 +373,12 @@ public final class PopupController {
                     @Override
                     public void run() {
                         try {
-                            String shotName = shot == null ? null : shot.fileName;
-                            String shotUri = (shot != null && shot.uri != null)
-                                    ? shot.uri.toString() : null;
-                            final NoteWriter.Saved saved = NoteWriter.save(
-                                    app, text, shotName, shotUri);
+                            final NoteWriter.Saved saved = NoteWriter.save(app, text, shot);
+                            ShotStore.delete(shot);
                             MAIN.post(new Runnable() {
                                 @Override
                                 public void run() {
-                                    Toast.makeText(app, "已收纳到 Inbox（"
+                                    Toast.makeText(app, "已收纳到 test（"
                                             + NoteWriter.platformLabel(saved.platform) + "）",
                                             Toast.LENGTH_SHORT).show();
                                     markDismissed(text);
@@ -385,11 +386,11 @@ public final class PopupController {
                                 }
                             });
                         } catch (final NoteWriter.NotConfiguredException exc) {
-                            if (shot != null) ShotStore.delete(app, shot);
+                            if (shot != null) ShotStore.delete(shot);
                             MAIN.post(new Runnable() {
                                 @Override
                                 public void run() {
-                                    Toast.makeText(app, "请先在「灵感」里选择 00-Inbox 文件夹",
+                                    Toast.makeText(app, "请先在「灵感」里选择 test 文件夹",
                                             Toast.LENGTH_LONG).show();
                                     openMain(app);
                                     if (currentView == wrapper) dismissCurrent();
@@ -465,7 +466,7 @@ public final class PopupController {
         String url = NoteWriter.findSupportedUrl(text);
         if (url == null) {
             platDot.setBackground(UiKit.roundRect(app, UiKit.PAPER_MUTED, 999));
-            tagTxt.setText("非抖音 / 小红书 / 公众号链接");
+            tagTxt.setText("未识别到 B 站、抖音、小红书或公众号链接");
             preview.setText(compact(text, 120));
             save.setEnabled(false);
             save.setVisibility(View.GONE);
@@ -491,7 +492,8 @@ public final class PopupController {
                     @Override
                     public void run() {
                         if (currentView != ownerWrapper) return;
-                        save.setText(folder.isEmpty() ? "去选 Inbox 目录" : ("收纳到 " + folder));
+                        save.setText(NoteWriter.FOLDER_NAME.equals(folder)
+                                ? "收纳到 " + folder : "去选 test 文件夹");
                     }
                 });
             }

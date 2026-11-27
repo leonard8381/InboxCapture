@@ -1,33 +1,24 @@
 package com.zao.inboxcapture;
 
 import android.accessibilityservice.AccessibilityService;
-import android.content.ContentResolver;
 import android.content.Context;
-import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.hardware.HardwareBuffer;
-import android.net.Uri;
 import android.os.Build;
-import android.provider.DocumentsContract;
-import android.provider.OpenableColumns;
 import android.view.Display;
 
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.OutputStream;
-import java.security.SecureRandom;
-import java.text.SimpleDateFormat;
-import java.util.Date;
-import java.util.Locale;
 
 /**
  * 用无障碍服务的 takeScreenshot（Android 11+）截取当前屏幕，
- * 存进用户选定的同一个 00-Inbox 文件夹。
+ * 先存入应用缓存，确认收纳后再随笔记写入日期目录。
  */
 public final class ScreenshotCapture {
     public interface Callback {
         void onCaptured(CapturedShot shot);
     }
-
-    private static final SecureRandom RANDOM = new SecureRandom();
 
     private ScreenshotCapture() {}
 
@@ -37,7 +28,7 @@ public final class ScreenshotCapture {
             callback.onCaptured(null);
             return;
         }
-        if (Prefs.treeUri(context).isEmpty()) {
+        if (NoteWriter.captureTree(context) == null) {
             callback.onCaptured(null);
             return;
         }
@@ -81,76 +72,23 @@ public final class ScreenshotCapture {
     }
 
     private static CapturedShot save(Context context, Bitmap bitmap) {
-        ContentResolver resolver = context.getContentResolver();
-        Uri tree;
-        String treeId;
+        File pending = null;
+        boolean complete = false;
         try {
-            tree = Uri.parse(Prefs.treeUri(context));
-            treeId = DocumentsContract.getTreeDocumentId(tree);
-        } catch (Exception exc) {
-            return null;
-        }
-        Uri parent = DocumentsContract.buildDocumentUriUsingTree(tree, treeId);
-        String id = new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(new Date())
-                + "-" + String.format(Locale.US, "%04x", RANDOM.nextInt(0x10000));
-        String name = id + ".jpg";
-
-        Uri created = null;
-        try {
-            created = DocumentsContract.createDocument(resolver, parent, "image/jpeg", name);
-        } catch (Exception ignored) {
-            created = null;
-        }
-        if (created == null) {
-            try {
-                created = DocumentsContract.createDocument(
-                        resolver, parent, "application/octet-stream", name);
-            } catch (Exception ignored) {
-                created = null;
-            }
-        }
-        if (created == null) {
-            return null;
-        }
-
-        String actual = queryName(resolver, created);
-        if (actual != null && !actual.toLowerCase(Locale.US).endsWith(".jpg")) {
-            try {
-                DocumentsContract.renameDocument(resolver, created, name);
-            } catch (Exception ignored) {
-                // 名字不对也能写，只是 Obsidian 可能不预览。
-            }
-        }
-
-        try (OutputStream out = resolver.openOutputStream(created, "w")) {
-            if (out == null) {
-                ShotStore.deleteUri(resolver, created);
-                return null;
-            }
-            if (!bitmap.compress(Bitmap.CompressFormat.JPEG, 90, out)) {
-                ShotStore.deleteUri(resolver, created);
-                return null;
-            }
-            out.flush();
-        } catch (Exception exc) {
-            ShotStore.deleteUri(resolver, created);
-            return null;
-        }
-        return new CapturedShot(name, created);
-    }
-
-    private static String queryName(ContentResolver resolver, Uri uri) {
-        try (Cursor cursor = resolver.query(
-                uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
-            if (cursor != null && cursor.moveToFirst()) {
-                int index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
-                if (index >= 0) {
-                    return cursor.getString(index);
+            pending = File.createTempFile("capture-", ".jpg", context.getCacheDir());
+            try (OutputStream output = new FileOutputStream(pending)) {
+                if (!bitmap.compress(Bitmap.CompressFormat.JPEG, 90, output)) {
+                    return null;
                 }
             }
-        } catch (Exception ignored) {
-            // 名字查询失败不影响保存。
+            complete = true;
+            return new CapturedShot(pending);
+        } catch (Exception exc) {
+            return null;
+        } finally {
+            if (!complete && pending != null) {
+                pending.delete();
+            }
         }
-        return null;
     }
 }
